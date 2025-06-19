@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/oyxning/astrbot_plugin_knowledge_base/refs/heads/master/knowledge_baselogo.png" alt="LumineStory Banner" width="100%" style="border-radius: 8px;" />
+  <img src="https://raw.githubusercontent.com/lxfight/astrbot_plugin_knowledge_base/refs/heads/master/knowledge_baselogo.png" alt="LumineStory Banner" width="100%" style="border-radius: 8px;" />
 </p>
 
 <code>astrbot_plugin_knowledge_base</code> 是一个为 <a href="https://github.com/Soulter/AstrBot">AstrBot</a> 聊天机器人框架量身定制的强大知识库插件。
