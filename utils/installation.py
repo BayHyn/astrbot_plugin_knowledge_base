@@ -140,7 +140,7 @@ def ensure_vector_db_dependencies(
         "numpy", ">=2.2.0", friendly_name="Numpy"
     )
     core_deps_ok &= _check_and_install_package_uv(
-        "markitdown[all]", ">=0.1.0", friendly_name="markitdown[all]"
+        "markitdown-no-magika[pptx,docx,xlsx,xls,pdf]", ">=0.1.0", friendly_name="markitdown-no-magika[pptx,docx,xlsx,xls,pdf]"
     )
 
     if not core_deps_ok:
