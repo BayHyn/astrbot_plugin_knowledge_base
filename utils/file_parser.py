@@ -15,7 +15,7 @@ from ..core.constants import (
     MARKITDOWN_EXTENSIONS,
     AUDIO_EXTENSIONS,
 )
-from markitdown import MarkItDown
+from markitdown_no_magika import MarkItDown
 from openai import AsyncOpenAI, OpenAI
 
 
