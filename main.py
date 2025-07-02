@@ -258,6 +258,7 @@ class KnowledgeBasePlugin(Star):
         ):
             yield result
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @kb_add_group.command("file")
     async def kb_add_file(
         self,
