@@ -512,14 +512,16 @@ class EnhancedFaissStore(VectorDBBase):
         logger.info("增强型FAISS存储已关闭")
     
     def _extract_keywords(self, text: str) -> List[str]:
-        """提取关键词（简化实现）"""
-        # TODO 这里可以实现更复杂的关键词提取
-        import re
-        words = re.findall(r'\b\w+\b', text.lower())
-        # 简单的停用词过滤
-        stop_words = {'的', '一个', '和', '或', '但是', '在', '上', '到', '为'}
-        keywords = [word for word in words if word not in stop_words and len(word) > 1]
-        return list(set(keywords))[:20]  # 限制关键词数量
+        """使用jieba提取关键词"""
+        try:
+            import jieba.analyse
+            return jieba.analyse.extract_tags(text, topK=20)
+        except ImportError:
+            logger.warning("jieba库未安装，无法提取关键词。将返回空列表。")
+            return []
+        except Exception as e:
+            logger.error(f"使用jieba提取关键词时出错: {e}")
+            return []
     
     def _compute_hash(self, text: str) -> str:
         """计算文本哈希"""
