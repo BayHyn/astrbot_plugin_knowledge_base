@@ -78,8 +78,8 @@ class DocumentService:
         collection_name: str,
         event: AstrMessageEvent,
     ) -> AsyncGenerator[AstrMessageEvent, None]:
-        # This is a simplified version of the original handle_add_file.
-        # The full logic will be implemented in subsequent steps.
+        # 这是原始 handle_add_file 的简化版本。
+        # 完整逻辑将在后续步骤中实现。
         yield event.plain_result(f"开始处理文件/URL: {path_or_url}")
-        # Placeholder for the full implementation
+        # 完整实现的占位符
         pass

@@ -517,8 +517,8 @@ class EnhancedFaissStore(VectorDBBase):
         import re
         words = re.findall(r'\b\w+\b', text.lower())
         # 简单的停用词过滤
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'}
-        keywords = [word for word in words if word not in stop_words and len(word) > 2]
+        stop_words = {'的', '一个', '和', '或', '但是', '在', '上', '到', '为'}
+        keywords = [word for word in words if word not in stop_words and len(word) > 1]
         return list(set(keywords))[:20]  # 限制关键词数量
     
     def _compute_hash(self, text: str) -> str:

@@ -11,7 +11,7 @@ async def handle_add_text(
     content: str,
     collection_name: Optional[str] = None,
 ) -> AsyncGenerator[AstrMessageEvent, None]:
-    """Handles the command to add text to a knowledge base."""
+    """处理向知识库添加文本的命令。"""
     target_collection = (
         collection_name
         or plugin.user_prefs_handler.get_user_default_collection(event)
@@ -29,7 +29,7 @@ async def handle_add_file(
     path_or_url: str,
     collection_name: Optional[str] = None,
 ) -> AsyncGenerator[AstrMessageEvent, None]:
-    """Handles the command to add a file or URL content to a knowledge base."""
+    """处理向知识库添加文件或URL内容的命令。"""
     target_collection = (
         collection_name
         or plugin.user_prefs_handler.get_user_default_collection(event)

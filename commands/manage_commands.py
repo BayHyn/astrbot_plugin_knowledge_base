@@ -47,7 +47,7 @@ async def handle_create_collection(
 async def handle_delete_collection_logic(
     plugin: "KnowledgeBasePlugin", confirm_event: AstrMessageEvent, collection_name: str
 ):
-    """Actual deletion logic called by the session waiter."""
+    """由会话等待器调用的实际删除逻辑。"""
     try:
         await confirm_event.send(
             confirm_event.plain_result(f"正在删除知识库 '{collection_name}'...")

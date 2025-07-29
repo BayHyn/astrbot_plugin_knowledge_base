@@ -137,11 +137,11 @@ class FileParser:
                 self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
                 self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
                 self.llm_enabled = True
-                logger.info("FileParser: LLM clients configured successfully.")
+                logger.info("FileParser: LLM客户端配置成功。")
             else:
-                logger.warning("FileParser: LLM provider config is incomplete. LLM-based parsing will be disabled.")
+                logger.warning("FileParser: LLM提供商配置不完整。基于LLM的解析将被禁用。")
         else:
-            logger.warning("FileParser: No LLM provider configured. LLM-based parsing will be disabled.")
+            logger.warning("FileParser: 未配置LLM提供商。基于LLM的解析将被禁用。")
 
         self.md_converter = MarkItDown(
             enable_plugins=self.llm_enabled,
@@ -153,7 +153,7 @@ class FileParser:
         try:
             return await _detect_and_read_file(file_path)
         except Exception as e:
-            logger.error(f"Error parsing text file {file_path}: {e}")
+            logger.error(f"解析文本文件 {file_path} 时出错: {e}")
             return None
 
     async def _parse_markdown(self, file_path: str) -> Optional[str]:
@@ -164,12 +164,12 @@ class FileParser:
             )
             return result.text_content
         except Exception as e:
-            logger.error(f"MarkItDown conversion failed for {file_path}: {e}")
+            logger.error(f"MarkItDown转换失败: {file_path}: {e}")
             return None
 
     async def _parse_image(self, file_path: str) -> Optional[str]:
         if not self.llm_enabled:
-            logger.warning("LLM parser not enabled, cannot parse image.")
+            logger.warning("LLM解析器未启用，无法解析图像。")
             return None
         try:
             with open(file_path, "rb") as image_file:
@@ -190,12 +190,12 @@ class FileParser:
             )
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"Image parsing failed for {file_path}: {e}")
+            logger.error(f"图像解析失败: {file_path}: {e}")
             return None
 
     async def _parse_audio(self, file_path: str) -> Optional[str]:
         if not self.llm_enabled:
-            logger.warning("LLM parser not enabled, cannot parse audio.")
+            logger.warning("LLM解析器未启用，无法解析音频。")
             return None
         try:
             with open(file_path, "rb") as audio_file:
@@ -216,7 +216,7 @@ class FileParser:
             )
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"Audio parsing failed for {file_path}: {e}")
+            logger.error(f"音频解析失败: {file_path}: {e}")
             return None
 
     async def parse_file_content(self, file_path: str) -> Optional[str]:

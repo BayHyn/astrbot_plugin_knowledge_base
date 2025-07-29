@@ -32,46 +32,46 @@ class LLMEnhancerService:
         default_collection_name = self.user_prefs_handler.get_user_default_collection(event)
 
         if not default_collection_name:
-            logger.debug("No default knowledge base found for the current session, skipping LLM request enhancement.")
+            logger.debug("当前会话未找到默认知识库，跳过LLM请求增强。")
             return
 
         if not await self.vector_db.collection_exists(default_collection_name):
-            logger.warning(f"User's default knowledge base '{default_collection_name}' does not exist, skipping LLM request enhancement.")
+            logger.warning(f"用户的默认知识库 '{default_collection_name}' 不存在，跳过LLM请求增强。")
             return
 
         if not self.settings.enable_kb_llm_enhancement:
-            logger.info("Knowledge base enhancement for LLM requests is globally disabled.")
+            logger.info("LLM请求的知识库增强功能已全局禁用。")
             return
 
         user_query = req.prompt
         if not user_query or not user_query.strip():
-            logger.debug("User query is empty, skipping knowledge base search.")
+            logger.debug("用户查询为空，跳过知识库搜索。")
             return
 
         try:
-            logger.info(f"Searching in knowledge base '{default_collection_name}' for LLM request: '{user_query[:50]}...' (top_k={self.settings.kb_llm_search_top_k})")
+            logger.info(f"在知识库 '{default_collection_name}' 中为LLM请求搜索: '{user_query[:50]}...' (top_k={self.settings.kb_llm_search_top_k})")
             search_results = await self.vector_db.search(
                 default_collection_name, user_query, top_k=self.settings.kb_llm_search_top_k
             )
         except Exception as e:
-            logger.error(f"Failed to search knowledge base '{default_collection_name}' for LLM request: {e}", exc_info=True)
+            logger.error(f"为LLM请求搜索知识库 '{default_collection_name}' 失败: {e}", exc_info=True)
             return
 
         if not search_results:
-            logger.info(f"No relevant content found in knowledge base '{default_collection_name}' for query '{user_query[:50]}...'.")
+            logger.info(f"在知识库 '{default_collection_name}' 中未找到与查询 '{user_query[:50]}...' 相关的内容。")
             return
 
         retrieved_contexts_list = []
         for doc, score in search_results:
             if score >= self.settings.kb_llm_min_similarity_score:
-                source_info = doc.metadata.get("source", "Unknown source")
-                context_item = f"- Content: {doc.text_content} (Source: {source_info}, Relevance: {score:.2f})"
+                source_info = doc.metadata.get("source", "未知来源")
+                context_item = f"- 内容: {doc.text_content} (来源: {source_info}, 相关度: {score:.2f})"
                 retrieved_contexts_list.append(context_item)
             else:
-                logger.debug(f"Document '{doc.text_content[:30]}...' with relevance {score:.2f} is below the threshold {self.settings.kb_llm_min_similarity_score}, ignored.")
+                logger.debug(f"文档 '{doc.text_content[:30]}...' 的相关度 {score:.2f} 低于阈值 {self.settings.kb_llm_min_similarity_score}，已忽略。")
 
         if not retrieved_contexts_list:
-            logger.info(f"All retrieved knowledge base content is below the relevance threshold {self.settings.kb_llm_min_similarity_score}, no enhancement will be performed.")
+            logger.info(f"所有检索到的知识库内容都低于相关度阈值 {self.settings.kb_llm_min_similarity_score}，不执行增强。")
             return
 
         formatted_contexts = "\n".join(retrieved_contexts_list)
@@ -85,15 +85,15 @@ class LLMEnhancerService:
                 req.system_prompt = f"{knowledge_to_insert}\n\n{req.system_prompt}"
             else:
                 req.system_prompt = knowledge_to_insert
-            logger.info(f"Knowledge base content has been added to system_prompt. Length: {len(knowledge_to_insert)}")
-        else: # prepend_prompt is the default
+            logger.info(f"知识库内容已添加到 system_prompt。长度: {len(knowledge_to_insert)}")
+        else: # prepend_prompt 是默认值
             req.prompt = f"{knowledge_to_insert}\n\n{USER_PROMPT_DELIMITER_IN_HISTORY}{req.prompt}"
-            logger.info(f"Knowledge base content has been prepended to the user prompt. Length: {len(knowledge_to_insert)}")
+            logger.info(f"知识库内容已前置到用户提示。长度: {len(knowledge_to_insert)}")
 
 
 def clean_contexts_from_kb_content(req: ProviderRequest):
     """
-    Automatically removes content added by the knowledge base from the history of the req.contexts.
+    自动从 req.contexts 的历史记录中删除由知识库添加的内容。
     """
     if not req.contexts:
         return
@@ -106,7 +106,7 @@ def clean_contexts_from_kb_content(req: ProviderRequest):
         content = message.get("content", "")
 
         if role == "system" and KB_START_MARKER in content:
-            logger.debug(f"Detected and removed knowledge base system message from history: {content[:100]}...")
+            logger.debug(f"检测到并从历史记录中删除知识库系统消息: {content[:100]}...")
             continue
         elif role == "user" and KB_START_MARKER in content:
             start_marker_idx = content.find(KB_START_MARKER)
@@ -123,16 +123,16 @@ def clean_contexts_from_kb_content(req: ProviderRequest):
                     ].strip()
                     message["content"] = original_user_prompt
                     cleaned_contexts.append(message)
-                    logger.debug(f"Cleaned knowledge base content from user message in history, retaining original user question: {original_user_prompt[:100]}...")
+                    logger.debug(f"从历史记录中的用户消息中清除了知识库内容，保留原始用户问题: {original_user_prompt[:100]}...")
                 else:
-                    logger.warning(f"Detected knowledge base marker in user message but missing original user question delimiter, removing the message: {content[:100]}...")
+                    logger.warning(f"在用户消息中检测到知识库标记，但缺少原始用户问题分隔符，正在删除消息: {content[:100]}...")
                     continue
             else:
-                logger.warning(f"Detected knowledge base start marker in user message but missing end marker, removing the message: {content[:100]}...")
+                logger.warning(f"在用户消息中检测到知识库开始标记，但缺少结束标记，正在删除消息: {content[:100]}...")
                 continue
         else:
             cleaned_contexts.append(message)
 
     req.contexts = cleaned_contexts
     if len(req.contexts) < initial_context_count:
-        logger.info(f"Successfully removed {initial_context_count - len(req.contexts)} knowledge base supplement messages from history.")
+        logger.info(f"成功从历史记录中删除 {initial_context_count - len(req.contexts)} 条知识库补充消息。")

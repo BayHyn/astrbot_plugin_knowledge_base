@@ -18,7 +18,7 @@ class EmbeddingUtil:
 
     def _create_client(self) -> Optional[AsyncOpenAI]:
         if not self.settings.api_key or not self.settings.api_url:
-            logger.warning("EmbeddingUtil: API key or URL is not configured. Client not created.")
+            logger.warning("EmbeddingUtil: API密钥或URL未配置。客户端未创建。")
             return None
         
         base_url = self.settings.api_url
@@ -34,10 +34,10 @@ class EmbeddingUtil:
     async def get_embedding_async(self, text: str) -> Optional[List[float]]:
         """获取单个文本的 embedding"""
         if not self.client:
-            logger.error("Embedding client is not initialized.")
+            logger.error("嵌入客户端未初始化。")
             return None
         if not text or not text.strip():
-            logger.warning("Input text is empty or contains only whitespace.")
+            logger.warning("输入文本为空或仅包含空白。")
             return None
         try:
             response = await self.client.embeddings.create(
@@ -46,22 +46,22 @@ class EmbeddingUtil:
             if response.data and hasattr(response.data[0], "embedding"):
                 return response.data[0].embedding
             else:
-                logger.error(f"Failed to get embedding, invalid API response: {response}")
+                logger.error(f"获取嵌入失败，无效的API响应: {response}")
                 return None
         except APIStatusError as e:
-            logger.error(f"API request failed (Status Error): {e.status_code}, {e.message}")
+            logger.error(f"API请求失败 (状态错误): {e.status_code}, {e.message}")
             return None
         except APIConnectionError as e:
-            logger.error(f"API connection failed: {e}")
+            logger.error(f"API连接失败: {e}")
             return None
         except RateLimitError as e:
-            logger.error(f"API rate limit exceeded: {e}")
+            logger.error(f"API速率限制已超出: {e}")
             return None
         except APIError as e:
-            logger.error(f"OpenAI API error: {e}")
+            logger.error(f"OpenAI API错误: {e}")
             return None
         except Exception as e:
-            logger.error(f"An unknown error occurred while getting embedding: {e}", exc_info=True)
+            logger.error(f"获取嵌入时发生未知错误: {e}", exc_info=True)
             return None
 
     async def get_embeddings_async(
@@ -69,7 +69,7 @@ class EmbeddingUtil:
     ) -> List[Optional[List[float]]]:
         """获取多个文本的 embedding (使用 OpenAI 批量接口)，每 10 条文本分批请求"""
         if not self.client:
-            logger.error("Embedding client is not initialized.")
+            logger.error("嵌入客户端未初始化。")
             return [None] * len(texts)
         if not texts:
             return []
@@ -95,9 +95,9 @@ class EmbeddingUtil:
                     for idx, (original_idx, _) in enumerate(batch_indices_texts):
                         final_embeddings[original_idx] = response.data[idx].embedding
                 else:
-                    logger.error(f"Batch {i // batch_size + 1}: Mismatch in response count.")
+                    logger.error(f"批处理 {i // batch_size + 1}: 响应计数不匹配。")
             except Exception as e:
-                logger.error(f"Batch {i // batch_size + 1}: Failed to get embeddings: {e}")
+                logger.error(f"批处理 {i // batch_size + 1}: 获取嵌入失败: {e}")
 
         return final_embeddings
 
