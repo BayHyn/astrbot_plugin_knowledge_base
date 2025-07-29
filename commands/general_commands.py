@@ -1,9 +1,10 @@
-# astrbot_plugin_knowledge_base/command/general_commands.py
+# astrbot_plugin_knowledge_base/commands/general_commands.py
 from typing import TYPE_CHECKING, AsyncGenerator
 from astrbot.api.event import AstrMessageEvent
 
 if TYPE_CHECKING:
     from ..main import KnowledgeBasePlugin
+
 
 async def handle_kb_help(
     plugin: "KnowledgeBasePlugin", event: AstrMessageEvent
@@ -38,7 +39,8 @@ async def handle_kb_use_collection(
         yield event.plain_result("请输入要设置的知识库名称。用法: /kb use <知识库名>")
         return
 
-    async for msg_result in plugin.user_prefs_handler.set_user_default_collection(
-        event, collection_name
-    ):
-        yield msg_result
+    try:
+        await plugin.kb_service.set_user_default_collection(event, collection_name)
+        yield event.plain_result(f"已将当前会话默认知识库设置为: {collection_name}")
+    except ValueError as e:
+        yield event.plain_result(str(e))
