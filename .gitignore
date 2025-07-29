@@ -169,3 +169,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+vector_store/vector_db_doc.md
+test_api_rerank.py
