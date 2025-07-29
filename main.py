@@ -21,14 +21,7 @@ from .utils.embedding import EmbeddingUtil, EmbeddingSolutionHelper
 from .utils.text_splitter import TextSplitterUtil
 from .utils.file_parser import FileParser, LLM_Config
 from .vector_store.base import VectorDBBase
-
-if VERSION < "3.5.13":
-    logger.info("建议升级至 AstrBot v3.5.13 或更高版本。")
-    from .vector_store.faiss_store import FaissStore
-else:
-    from .vector_store.enhanced_wrapper import EnhancedVectorStore
-from .vector_store.milvus_lite_store import MilvusLiteStore
-from .vector_store.milvus_store import MilvusStore
+from .vector_store.enhanced_wrapper import EnhancedVectorStore
 from .web_api import KnowledgeBaseWebAPI
 from .core.user_prefs_handler import UserPrefsHandler
 from .core.llm_enhancer import clean_contexts_from_kb_content, enhance_request_with_kb
@@ -130,56 +123,20 @@ class KnowledgeBasePlugin(Star):
             self.file_parser = FileParser(self.llm_config)
             logger.info("文件解析器初始化完成。")
 
-            # Vector DB
-            db_type = self.config.get("vector_db_type", "faiss")
-
-            # 构建重排序配置
+            # Vector DB - 统一使用 EnhancedVectorStore
             from .vector_store.config_adapter import create_rerank_config_from_astrbot
             rerank_config = create_rerank_config_from_astrbot(self.config)
-
-            if db_type == "faiss":
-                faiss_subpath = self.config.get("faiss_db_subpath", "faiss_data")
-                faiss_full_path = os.path.join(
-                    self.persistent_data_root_path, faiss_subpath
-                )
-                
-                # 使用增强的向量存储（支持API重排序）
-                if VERSION < "3.5.13":
-                    from .vector_store.faiss_store import FaissStore
-                    self.vector_db = FaissStore(self.embedding_util, faiss_full_path)
-                else:
-                    from .vector_store.enhanced_wrapper import EnhancedVectorStore
-                    self.vector_db = EnhancedVectorStore(
-                        self.embedding_util,
-                        faiss_full_path,
-                        rerank_config=rerank_config
-                    )
-            elif db_type == "milvus_lite":
-                milvus_lite_subpath = self.config.get(
-                    "milvus_lite_db_subpath", "milvus_lite_data/milvus_lite.db"
-                )
-                milvus_lite_full_path = os.path.join(
-                    self.persistent_data_root_path, milvus_lite_subpath
-                )
-                os.makedirs(os.path.dirname(milvus_lite_full_path), exist_ok=True)
-                
-                # 注意：MilvusLiteStore暂不支持API重排序
-                self.vector_db = MilvusLiteStore(
-                    self.embedding_util, milvus_lite_full_path
-                )
-            elif db_type == "milvus":
-                # 注意：MilvusStore暂不支持API重排序
-                self.vector_db = MilvusStore(
-                    self.embedding_util,
-                    data_path="",
-                    host=self.config.get("milvus_host"),
-                    port=self.config.get("milvus_port"),
-                    user=self.config.get("milvus_user"),
-                    password=self.config.get("milvus_password"),
-                )
-            else:
-                logger.error(f"不支持的向量数据库类型: {db_type}，请检查配置。")
-                return
+            
+            faiss_subpath = self.config.get("faiss_db_subpath", "faiss_data")
+            faiss_full_path = os.path.join(
+                self.persistent_data_root_path, faiss_subpath
+            )
+            
+            self.vector_db = EnhancedVectorStore(
+                self.embedding_util,
+                faiss_full_path,
+                rerank_config=rerank_config
+            )
             
             # User Preferences Handler
             self.user_prefs_handler = UserPrefsHandler(
@@ -354,16 +311,8 @@ class KnowledgeBasePlugin(Star):
     @kb_group.command("create", alias={"创建"})
     async def kb_create_collection(self, event: AstrMessageEvent, collection_name: str):
         """创建一个新的知识库"""
-        if VERSION >= "3.5.13":
-            yield event.plain_result("请在 WebUI 中使用知识库创建功能。")
-            return
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_create_collection(
-            self, event, collection_name
-        ):
-            yield result
+        yield event.plain_result("请在 WebUI 中使用知识库创建功能。")
+        return
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @kb_group.command("delete", alias={"删除"})
@@ -465,11 +414,6 @@ class KnowledgeBasePlugin(Star):
     @kb_group.command("migrate", alias={"迁移"})
     async def kb_faiss_migrate(self, event: AstrMessageEvent):
         """迁移旧的 .docs 文件到新的向量数据库格式"""
-        if self.config.get("vector_db_type", "faiss") != "faiss":
-            yield event.plain_result(
-                "当前配置的向量数据库类型不是 Faiss，迁移操作仅适用于 Faiss 数据库。"
-            )
-            return
         if not await self._ensure_initialized():
             yield event.plain_result("知识库插件未初始化，请联系管理员。")
             return

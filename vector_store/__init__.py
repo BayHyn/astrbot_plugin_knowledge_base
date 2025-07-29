@@ -1,16 +1,13 @@
 """
 向量存储模块
-提供多种向量存储实现和重排序功能
+提供增强型向量存储实现和重排序功能
 """
 
 # 基础组件
 from .base import VectorDBBase, Document
 
-# 存储实现
-from .faiss_store import FaissStore
+# 存储实现 - 仅保留增强型
 from .enhanced_faiss_store import EnhancedFaissStore
-from .milvus_store import MilvusStore
-from .milvus_lite_store import MilvusLiteStore
 
 # 重排序功能
 from .rerank_service import (
@@ -37,7 +34,7 @@ from .config_adapter import (
     get_rerank_config_summary
 )
 
-# 增强包装器
+# 增强包装器 - 这是主要的存储实现
 from .enhanced_wrapper import EnhancedVectorStore, EnhancedStoreConfig
 
 # 迁移工具
@@ -48,11 +45,8 @@ __all__ = [
     'VectorDBBase',
     'Document',
     
-    # 存储实现
-    'FaissStore',
+    # 存储实现 - 仅保留增强型
     'EnhancedFaissStore',
-    'MilvusStore',
-    'MilvusLiteStore',
     
     # 重排序功能
     'RerankService',
@@ -78,7 +72,7 @@ __all__ = [
     'validate_rerank_config',
     'get_rerank_config_summary',
     
-    # 增强包装器
+    # 增强包装器 - 这是主要的存储实现
     'EnhancedVectorStore',
     'EnhancedStoreConfig',
     
