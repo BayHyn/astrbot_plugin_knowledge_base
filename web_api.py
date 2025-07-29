@@ -2,38 +2,38 @@ import os
 import time
 import uuid
 from astrbot.api.star import Context
-from .vector_store.base import VectorDBBase, Document
+from .services.document_service import DocumentService
+from .services.kb_service import KnowledgeBaseService
+from .config.settings import PluginSettings
+from .vector_store.base import Document
 from quart import request
 from astrbot.dashboard.server import Response
-from .utils.text_splitter import TextSplitterUtil
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from .utils.file_parser import FileParser, LLM_Config
 from astrbot import logger
-from astrbot.api import AstrBotConfig
 from astrbot.core.config.default import VERSION
-from .core.user_prefs_handler import UserPrefsHandler
 
 
 class KnowledgeBaseWebAPI:
     def __init__(
         self,
-        vec_db: VectorDBBase,
-        text_splitter: TextSplitterUtil,
+        kb_service: KnowledgeBaseService,
+        document_service: DocumentService,
         astrbot_context: Context,
-        llm_config: LLM_Config,
-        user_prefs_handler: UserPrefsHandler = None,
-        plugin_config: AstrBotConfig = None,
+        plugin_config: PluginSettings,
     ):
-        self.vec_db = vec_db
-        self.text_splitter = text_splitter
+        self.kb_service = kb_service
+        self.document_service = document_service
         self.astrbot_context = astrbot_context
-        self.user_prefs_handler = user_prefs_handler
         self.plugin_config = plugin_config
 
+        # 从服务中获取依赖
+        self.vec_db = self.kb_service.vector_db
+        self.user_prefs_handler = self.kb_service.user_prefs_handler
+        self.fp = self.document_service.file_parser
+        self.text_splitter = self.document_service.text_splitter
+
         if VERSION < "3.5.13":
-            raise RuntimeError(
-                "AstrBot 版本过低，无法支持 FAISS 存储，请升级 AstrBot 至 3.5.13 或更高版本。"
-            )
+            raise RuntimeError("AstrBot 版本过低，无法支持此插件，请升级 AstrBot。")
 
         self.astrbot_context.register_web_api(
             "/alkaid/kb/create_collection",
@@ -65,7 +65,6 @@ class KnowledgeBaseWebAPI:
             ["GET"],
             "删除指定集合",
         )
-        self.fp = FileParser(llm_config=llm_config)
 
     async def create_collection(self):
         """
