@@ -14,7 +14,7 @@ from astrbot.core.config.default import VERSION
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
 
-from .config.settings import PluginConfig
+from .config.settings import PluginSettings
 from .services.document_service import DocumentService
 from .services.kb_service import KnowledgeBaseService
 from .services.llm_enhancer_service import LLMEnhancerService
@@ -48,7 +48,7 @@ class KnowledgeBasePlugin(Star):
         self.user_prefs_handler: Optional[UserPrefsHandler] = None
 
         # Initialize plugin config
-        self.plugin_config = PluginConfig.from_astrbot_config(config)
+        self.plugin_config = PluginSettings.from_astrbot_config(config)
 
         # Start initialization
         self.init_task = asyncio.create_task(self._initialize_components())
@@ -68,32 +68,55 @@ class KnowledgeBasePlugin(Star):
         try:
             logger.info("知识库插件开始初始化...")
 
-            # Initialize services
-            self.kb_service = KnowledgeBaseService(
-                config=self.plugin_config,
-                context=self.context,
-                data_dir=self.persistent_data_root_path
-            )
-            await self.kb_service.initialize()
+            # --- 依赖注入顺序 ---
+            # 1. 初始化嵌入工具
+            from .utils.embedding import EmbeddingSolutionHelper
+            embedding_helper = EmbeddingSolutionHelper(self.plugin_config.embedding)
 
-            self.document_service = DocumentService(
-                kb_service=self.kb_service,
-                config=self.plugin_config
+            # 2. 初始化向量数据库
+            from .vector_store.enhanced_faiss_store import EnhancedFaissStore
+            vector_db = EnhancedFaissStore(
+                embedding_util=embedding_helper,
+                data_path=self.persistent_data_root_path
             )
+            await vector_db.initialize()
 
-            self.llm_enhancer_service = LLMEnhancerService(
-                config=self.plugin_config,
-                context=self.context
-            )
-
+            # 3. 初始化用户偏好处理器
             self.user_prefs_handler = UserPrefsHandler(
-                self.user_prefs_path,
-                self.kb_service,
-                self.plugin_config
+                prefs_path=self.user_prefs_path,
+                vector_db=vector_db,
+                config=self.plugin_config
             )
             await self.user_prefs_handler.load_user_preferences()
 
-            # Initialize Web API
+            # 4. 初始化知识库服务
+            self.kb_service = KnowledgeBaseService(
+                vector_db=vector_db,
+                user_prefs_handler=self.user_prefs_handler,
+                settings=self.plugin_config
+            )
+
+            # 5. 初始化文档服务
+            from .utils.file_parser import FileParser
+            from .utils.text_splitter import TextSplitterUtil
+            file_parser = FileParser(self.context, self.plugin_config.llm_parser)
+            text_splitter = TextSplitterUtil(chunk_size=1000, chunk_overlap=200)
+            self.document_service = DocumentService(
+                vector_db=vector_db,
+                kb_service=self.kb_service,
+                file_parser=file_parser,
+                text_splitter=text_splitter,
+                data_path=self.persistent_data_root_path
+            )
+
+            # 6. 初始化LLM增强服务
+            self.llm_enhancer_service = LLMEnhancerService(
+                vector_db=vector_db,
+                user_prefs_handler=self.user_prefs_handler,
+                settings=self.plugin_config
+            )
+
+            # 7. Initialize Web API
             try:
                 self.web_api = KnowledgeBaseWebAPI(
                     kb_service=self.kb_service,

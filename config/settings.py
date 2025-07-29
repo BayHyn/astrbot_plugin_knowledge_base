@@ -29,6 +29,10 @@ class PluginSettings(BaseModel):
     kb_llm_search_top_k: int = Field(3, description="为LLM增强检索的文档数量")
     kb_llm_insertion_method: str = Field("prepend_prompt", description="如何插入知识库内容: prepend_prompt 或 system_prompt")
     kb_llm_min_similarity_score: float = Field(0.5, description="认为文档相关的最低相似度分数")
+    kb_llm_context_template: str = Field(
+        "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。",
+        description="用于包装知识库上下文的模板"
+    )
     
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     llm_parser: LLMSettings = Field(default_factory=LLMSettings)
@@ -44,6 +48,7 @@ class PluginSettings(BaseModel):
             kb_llm_search_top_k=config.get("kb_llm_search_top_k", 3),
             kb_llm_insertion_method=config.get("kb_llm_insertion_method", "prepend_prompt"),
             kb_llm_min_similarity_score=config.get("kb_llm_min_similarity_score", 0.5),
+            kb_llm_context_template=config.get("kb_llm_context_template", "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。"),
             embedding=EmbeddingSettings(
                 provider=config.get("embedding_provider", "openai"),
                 api_url=config.get("embedding_api_url"),

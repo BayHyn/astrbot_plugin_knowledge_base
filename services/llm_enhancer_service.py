@@ -24,12 +24,13 @@ class LLMEnhancerService:
         self.user_prefs_handler = user_prefs_handler
         self.settings = settings
 
-    async def enhance_request_with_kb(
+    async def enhance_request(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
+        user_prefs_handler: UserPrefsHandler,
     ):
-        default_collection_name = self.user_prefs_handler.get_user_default_collection(event)
+        default_collection_name = user_prefs_handler.get_user_default_collection(event)
 
         if not default_collection_name:
             logger.debug("当前会话未找到默认知识库，跳过LLM请求增强。")

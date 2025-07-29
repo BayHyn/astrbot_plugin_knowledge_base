@@ -78,8 +78,109 @@ class DocumentService:
         collection_name: str,
         event: AstrMessageEvent,
     ) -> AsyncGenerator[AstrMessageEvent, None]:
-        # 这是原始 handle_add_file 的简化版本。
-        # 完整逻辑将在后续步骤中实现。
-        yield event.plain_result(f"开始处理文件/URL: {path_or_url}")
-        # 完整实现的占位符
-        pass
+        """将文件或URL内容添加到知识库集合中"""
+        try:
+            # 验证输入
+            if not path_or_url.strip():
+                yield event.plain_result("文件路径或URL不能为空。")
+                return
+
+            # 确保集合存在
+            await self.kb_service.ensure_collection_exists(collection_name, event)
+
+            # 检查是否为URL
+            parsed_url = urlparse(path_or_url)
+            is_url = bool(parsed_url.scheme and parsed_url.netloc)
+
+            file_path = None
+            temp_file = False
+
+            try:
+                if is_url:
+                    # 下载文件
+                    yield event.plain_result(f"正在从URL下载文件: {path_or_url}")
+                    file_path = await file_utils.download_file(
+                        path_or_url, self.data_path
+                    )
+                    if not file_path:
+                        yield event.plain_result("文件下载失败，请检查URL和文件大小限制。")
+                        return
+                    temp_file = True
+                    yield event.plain_result("文件下载完成，开始解析...")
+                else:
+                    # 本地文件
+                    file_path = path_or_url
+                    if not os.path.exists(file_path):
+                        yield event.plain_result(f"文件不存在: {file_path}")
+                        return
+                    yield event.plain_result("开始解析本地文件...")
+
+                # 检查文件扩展名
+                _, extension = os.path.splitext(file_path)
+                extension = extension.lower()
+                if extension not in ALLOWED_FILE_EXTENSIONS:
+                    yield event.plain_result(
+                        f"不支持的文件类型: {extension}。支持的类型: {', '.join(ALLOWED_FILE_EXTENSIONS)}"
+                    )
+                    return
+
+                # 解析文件内容
+                content = await self.file_parser.parse_file_content(file_path)
+                if not content or not content.strip():
+                    yield event.plain_result("文件内容为空或无法解析。")
+                    return
+
+                # 文本分割
+                chunks = self.text_splitter.split_text(content)
+                if not chunks:
+                    yield event.plain_result("文本分割后无有效内容。")
+                    return
+
+                # 准备文档
+                source_name = os.path.basename(file_path) if not is_url else path_or_url
+                documents_to_add = [
+                    Document(
+                        text_content=chunk,
+                        metadata={
+                            "source": source_name,
+                            "user": event.get_sender_name(),
+                            "chunk_id": i,
+                            "total_chunks": len(chunks)
+                        },
+                    )
+                    for i, chunk in enumerate(chunks)
+                ]
+
+                # 添加到知识库
+                yield event.plain_result(
+                    f"正在处理 {len(chunks)} 个文本块并添加到知识库 '{collection_name}'..."
+                )
+                doc_ids = await self.vector_db.add_documents(
+                    collection_name, documents_to_add
+                )
+
+                if doc_ids:
+                    yield event.plain_result(
+                        f"成功添加 {len(doc_ids)} 条知识到 '{collection_name}'。\n"
+                        f"来源: {source_name}"
+                    )
+                else:
+                    yield event.plain_result(
+                        f"未能添加任何知识到 '{collection_name}'，请检查日志。"
+                    )
+
+            finally:
+                # 清理临时文件
+                if temp_file and file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"已删除临时文件: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"删除临时文件失败: {e}")
+
+        except Exception as e:
+            logger.error(
+                f"添加文件到知识库 '{collection_name}' 失败: {e}",
+                exc_info=True
+            )
+            yield event.plain_result(f"添加文件失败: {str(e)}")

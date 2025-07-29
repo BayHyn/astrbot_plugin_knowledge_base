@@ -7,6 +7,7 @@ import aiofiles
 from aiofiles.os import stat as aio_stat
 import chardet
 import asyncio
+from ..config.settings import LLMSettings
 from ..core.constants import (
     COMMON_ENCODINGS,
     READ_FILE_LIMIT,
@@ -119,8 +120,9 @@ async def _detect_and_read_file(file_path: str) -> str:
 class FileParser:
     """文件解析器主类"""
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, llm_settings: LLMSettings):
         self.context = context
+        self.llm_settings = llm_settings
         self.llm_enabled = False
         self.async_client = None
         self.sync_client = None
@@ -128,7 +130,18 @@ class FileParser:
         self._setup_llm_clients()
 
     def _setup_llm_clients(self):
-        provider_config = self.context.get_using_provider()
+        if not self.llm_settings.enable_llm_parser:
+            logger.info("FileParser: LLM解析功能已禁用。")
+            self.llm_enabled = False
+            return
+
+        provider_id = self.llm_settings.provider
+        if not provider_id:
+            logger.warning("FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。")
+            provider_config = self.context.get_using_provider()
+        else:
+            provider_config = self.context.get_provider(provider_id)
+
         if provider_config:
             api_key = provider_config.get_current_key()
             api_url = provider_config.provider_config.get("api_base")
@@ -137,11 +150,11 @@ class FileParser:
                 self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
                 self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
                 self.llm_enabled = True
-                logger.info("FileParser: LLM客户端配置成功。")
+                logger.info(f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name})。")
             else:
                 logger.warning("FileParser: LLM提供商配置不完整。基于LLM的解析将被禁用。")
         else:
-            logger.warning("FileParser: 未配置LLM提供商。基于LLM的解析将被禁用。")
+            logger.warning("FileParser: 未找到指定的LLM提供商。基于LLM的解析将被禁用。")
 
         self.md_converter = MarkItDown(
             enable_plugins=self.llm_enabled,
@@ -235,13 +248,13 @@ class FileParser:
 
             # 根据文件类型选择对应的解析器
             if extension in TEXT_EXTENSIONS:
-                return await self.text_parser.parse(file_path)
+                return await self._parse_text(file_path)
             elif extension in IMAGE_EXTENSIONS:
-                return await self.image_parser.parse(file_path)
+                return await self._parse_image(file_path)
             elif extension in MARKITDOWN_EXTENSIONS:
-                return await self.markdown_parser.parse(file_path)
+                return await self._parse_markdown(file_path)
             elif extension in AUDIO_EXTENSIONS:
-                return await self.audio_parser.parse(file_path)
+                return await self._parse_audio(file_path)
             else:
                 logger.warning(f"不支持的文件类型: {extension}，文件路径: {file_path}")
                 return None
