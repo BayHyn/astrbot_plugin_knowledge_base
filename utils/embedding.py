@@ -20,10 +20,10 @@ class EmbeddingUtil:
         if not self.settings.api_key or not self.settings.api_url:
             logger.warning("EmbeddingUtil: API密钥或URL未配置。客户端未创建。")
             return None
-        
+
         base_url = self.settings.api_url
         if base_url.endswith("/embeddings"):
-            base_url = base_url[:-len("/embeddings")]
+            base_url = base_url[: -len("/embeddings")]
 
         return AsyncOpenAI(
             api_key=self.settings.api_key,
@@ -84,7 +84,7 @@ class EmbeddingUtil:
         batch_size = 10
 
         for i in range(0, len(valid_texts_with_indices), batch_size):
-            batch_indices_texts = valid_texts_with_indices[i:i + batch_size]
+            batch_indices_texts = valid_texts_with_indices[i : i + batch_size]
             batch_texts = [text for _, text in batch_indices_texts]
 
             try:

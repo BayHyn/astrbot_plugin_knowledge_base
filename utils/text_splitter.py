@@ -1,11 +1,12 @@
 from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+
 class TextSplitterUtil:
     def __init__(self, chunk_size: int, chunk_overlap: int):
         """
         Initializes the text splitter using RecursiveCharacterTextSplitter from langchain.
-        
+
         Args:
             chunk_size: The target size of each chunk (in characters).
             chunk_overlap: The size of the overlap between chunks.
@@ -21,10 +22,10 @@ class TextSplitterUtil:
     def split_text(self, text: str) -> List[str]:
         """
         Splits the text into chunks.
-        
+
         Args:
             text: The text to be split.
-            
+
         Returns:
             A list of text chunks.
         """

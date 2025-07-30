@@ -34,7 +34,9 @@ class DocumentService:
         collection_name: str,
         event: AstrMessageEvent,
     ) -> AsyncGenerator[AstrMessageEvent, None]:
-        logger.info(f"收到向知识库 '{collection_name}' 添加文本的请求，发送者: {event.get_sender_name()}")
+        logger.info(
+            f"收到向知识库 '{collection_name}' 添加文本的请求，发送者: {event.get_sender_name()}"
+        )
         if not content.strip():
             logger.warning(f"添加文本内容为空，发送者: {event.get_sender_name()}")
             yield event.plain_result("添加的内容不能为空。")
@@ -78,7 +80,9 @@ class DocumentService:
                     f"未能添加任何知识到 '{collection_name}'，请检查日志。"
                 )
         except Exception as e:
-            logger.error(f"添加文本到知识库 '{collection_name}' 失败: {e}", exc_info=True)
+            logger.error(
+                f"添加文本到知识库 '{collection_name}' 失败: {e}", exc_info=True
+            )
             yield event.plain_result(f"添加知识失败: {e}")
 
     async def add_file_to_collection(
@@ -88,7 +92,9 @@ class DocumentService:
         event: AstrMessageEvent,
     ) -> AsyncGenerator[AstrMessageEvent, None]:
         """将文件或URL内容添加到知识库集合中"""
-        logger.info(f"收到向知识库 '{collection_name}' 添加文件的请求: {path_or_url}, 发送者: {event.get_sender_name()}")
+        logger.info(
+            f"收到向知识库 '{collection_name}' 添加文件的请求: {path_or_url}, 发送者: {event.get_sender_name()}"
+        )
         try:
             # 验证输入
             if not path_or_url.strip():
@@ -118,7 +124,9 @@ class DocumentService:
                     )
                     if not file_path:
                         logger.error(f"文件下载失败: {path_or_url}")
-                        yield event.plain_result("文件下载失败，请检查URL和文件大小限制。")
+                        yield event.plain_result(
+                            "文件下载失败，请检查URL和文件大小限制。"
+                        )
                         return
                     temp_file = True
                     logger.info(f"文件下载完成: {file_path}")
@@ -170,7 +178,7 @@ class DocumentService:
                             "source": source_name,
                             "user": event.get_sender_name(),
                             "chunk_id": i,
-                            "total_chunks": len(chunks)
+                            "total_chunks": len(chunks),
                         },
                     )
                     for i, chunk in enumerate(chunks)
@@ -180,7 +188,9 @@ class DocumentService:
                 yield event.plain_result(
                     f"正在处理 {len(chunks)} 个文本块并添加到知识库 '{collection_name}'..."
                 )
-                logger.info(f"开始向知识库 '{collection_name}' 添加 {len(chunks)} 个文档块")
+                logger.info(
+                    f"开始向知识库 '{collection_name}' 添加 {len(chunks)} 个文档块"
+                )
                 doc_ids = await self.vector_db.add_documents(
                     collection_name, documents_to_add
                 )
@@ -208,7 +218,6 @@ class DocumentService:
 
         except Exception as e:
             logger.error(
-                f"添加文件到知识库 '{collection_name}' 失败: {e}",
-                exc_info=True
+                f"添加文件到知识库 '{collection_name}' 失败: {e}", exc_info=True
             )
             yield event.plain_result(f"添加文件失败: {str(e)}")

@@ -137,7 +137,9 @@ class FileParser:
 
         provider_id = self.llm_settings.provider
         if not provider_id:
-            logger.warning("FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。")
+            logger.warning(
+                "FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。"
+            )
             provider_config = self.context.get_using_provider()
         else:
             provider_config = self.context.get_provider(provider_id)
@@ -150,9 +152,13 @@ class FileParser:
                 self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
                 self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
                 self.llm_enabled = True
-                logger.info(f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name})。")
+                logger.info(
+                    f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name})。"
+                )
             else:
-                logger.warning("FileParser: LLM提供商配置不完整。基于LLM的解析将被禁用。")
+                logger.warning(
+                    "FileParser: LLM提供商配置不完整。基于LLM的解析将被禁用。"
+                )
         else:
             logger.warning("FileParser: 未找到指定的LLM提供商。基于LLM的解析将被禁用。")
 
@@ -187,16 +193,24 @@ class FileParser:
         try:
             with open(file_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-            image_format = os.path.splitext(file_path)[1].lstrip('.')
-            
+            image_format = os.path.splitext(file_path)[1].lstrip(".")
+
             response = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "你是图片解析专家，请用当前图片语言提取图片中的文字，只返回纯净的段落文本，不要返回JSON或坐标信息。"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/{image_format};base64,{base64_image}"}},
+                            {
+                                "type": "text",
+                                "text": "你是图片解析专家，请用当前图片语言提取图片中的文字，只返回纯净的段落文本，不要返回JSON或坐标信息。",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{image_format};base64,{base64_image}"
+                                },
+                            },
                         ],
                     }
                 ],
@@ -213,7 +227,7 @@ class FileParser:
         try:
             with open(file_path, "rb") as audio_file:
                 base64_audio = base64.b64encode(audio_file.read()).decode("utf-8")
-            audio_format = os.path.splitext(file_path)[1].lstrip('.')
+            audio_format = os.path.splitext(file_path)[1].lstrip(".")
 
             response = await self.async_client.chat.completions.create(
                 model=self.model_name,
@@ -221,8 +235,17 @@ class FileParser:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "你是音频解析专家，请用当前音频语言提取音频中的文字(中文则使用简体)，只返回纯净的段落文本，不要返回JSON或坐标信息。"},
-                            {"type": "input_audio", "input_audio": {"data": base64_audio, "format": audio_format}},
+                            {
+                                "type": "text",
+                                "text": "你是音频解析专家，请用当前音频语言提取音频中的文字(中文则使用简体)，只返回纯净的段落文本，不要返回JSON或坐标信息。",
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": base64_audio,
+                                    "format": audio_format,
+                                },
+                            },
                         ],
                     }
                 ],

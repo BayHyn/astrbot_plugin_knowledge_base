@@ -71,13 +71,15 @@ class KnowledgeBasePlugin(Star):
             # --- 依赖注入顺序 ---
             # 1. 初始化嵌入工具
             from .utils.embedding import EmbeddingSolutionHelper
+
             embedding_helper = EmbeddingSolutionHelper(self.plugin_config.embedding)
 
             # 2. 初始化向量数据库
             from .vector_store.enhanced_faiss_store import EnhancedFaissStore
+
             vector_db = EnhancedFaissStore(
                 embedding_util=embedding_helper,
-                data_path=self.persistent_data_root_path
+                data_path=self.persistent_data_root_path,
             )
             await vector_db.initialize()
 
@@ -85,7 +87,7 @@ class KnowledgeBasePlugin(Star):
             self.user_prefs_handler = UserPrefsHandler(
                 prefs_path=self.user_prefs_path,
                 vector_db=vector_db,
-                config=self.plugin_config
+                config=self.plugin_config,
             )
             await self.user_prefs_handler.load_user_preferences()
 
@@ -93,12 +95,13 @@ class KnowledgeBasePlugin(Star):
             self.kb_service = KnowledgeBaseService(
                 vector_db=vector_db,
                 user_prefs_handler=self.user_prefs_handler,
-                settings=self.plugin_config
+                settings=self.plugin_config,
             )
 
             # 5. 初始化文档服务
             from .utils.file_parser import FileParser
             from .utils.text_splitter import TextSplitterUtil
+
             file_parser = FileParser(self.context, self.plugin_config.llm_parser)
             text_splitter = TextSplitterUtil(chunk_size=1000, chunk_overlap=200)
             self.document_service = DocumentService(
@@ -106,14 +109,14 @@ class KnowledgeBasePlugin(Star):
                 kb_service=self.kb_service,
                 file_parser=file_parser,
                 text_splitter=text_splitter,
-                data_path=self.persistent_data_root_path
+                data_path=self.persistent_data_root_path,
             )
 
             # 6. 初始化LLM增强服务
             self.llm_enhancer_service = LLMEnhancerService(
                 vector_db=vector_db,
                 user_prefs_handler=self.user_prefs_handler,
-                settings=self.plugin_config
+                settings=self.plugin_config,
             )
 
             # 7. Initialize Web API
