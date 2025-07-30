@@ -60,34 +60,41 @@ class PluginSettings(BaseModel):
     @classmethod
     def from_astrbot_config(cls, config: Dict[str, Any]) -> "PluginSettings":
         """从AstrBot的配置字典创建设置"""
+        # 使用插件特定的配置键前缀，同时保持向后兼容
+        def get_config_value(key: str, default_value=None):
+            # 优先使用带前缀的配置键
+            prefixed_key = f"astrbot_plugin_knowledge_base_{key}"
+            if prefixed_key in config:
+                return config[prefixed_key]
+            # 回退到无前缀的键（向后兼容）
+            return config.get(key, default_value)
+        
         return cls(
-            default_collection_name=config.get("default_collection_name", "general"),
-            auto_create_collection=config.get("auto_create_collection", True),
-            enable_kb_llm_enhancement=config.get("enable_kb_llm_enhancement", True),
-            kb_llm_search_top_k=config.get("kb_llm_search_top_k", 3),
-            kb_llm_insertion_method=config.get(
-                "kb_llm_insertion_method", "prepend_prompt"
-            ),
-            kb_llm_min_similarity_score=config.get("kb_llm_min_similarity_score", 0.5),
-            kb_llm_context_template=config.get(
+            default_collection_name=get_config_value("default_collection_name", "general"),
+            auto_create_collection=get_config_value("auto_create_collection", True),
+            enable_kb_llm_enhancement=get_config_value("enable_kb_llm_enhancement", True),
+            kb_llm_search_top_k=get_config_value("kb_llm_search_top_k", 3),
+            kb_llm_insertion_method=get_config_value("kb_llm_insertion_method", "prepend_prompt"),
+            kb_llm_min_similarity_score=get_config_value("kb_llm_min_similarity_score", 0.5),
+            kb_llm_context_template=get_config_value(
                 "kb_llm_context_template",
                 "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。",
             ),
             embedding=EmbeddingSettings(
-                provider=config.get("embedding_provider", "openai"),
-                api_url=config.get("embedding_api_url"),
-                api_key=config.get("embedding_api_key"),
-                model_name=config.get("embedding_model_name", "text-embedding-ada-002"),
-                dimensions=config.get("embedding_dimensions"),
+                provider=get_config_value("embedding_provider", "openai"),
+                api_url=get_config_value("embedding_api_url"),
+                api_key=get_config_value("embedding_api_key"),
+                model_name=get_config_value("embedding_model_name", "text-embedding-ada-002"),
+                dimensions=get_config_value("embedding_dimensions"),
             ),
             llm_parser=LLMSettings(
-                enable_llm_parser=config.get("enable_llm_parser", True),
-                provider=config.get("llm_parser_provider"),
+                enable_llm_parser=get_config_value("enable_llm_parser", True),
+                provider=get_config_value("llm_parser_provider"),
             ),
             rerank=RerankSettings(
-                strategy=config.get("rerank_strategy", "auto"),
-                api_provider=config.get("rerank_api_provider", "cohere"),
-                api_key=config.get("rerank_api_key"),
-                api_url=config.get("rerank_api_url"),
+                strategy=get_config_value("rerank_strategy", "auto"),
+                api_provider=get_config_value("rerank_api_provider", "cohere"),
+                api_key=get_config_value("rerank_api_key"),
+                api_url=get_config_value("rerank_api_url"),
             ),
         )
