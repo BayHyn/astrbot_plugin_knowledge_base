@@ -11,12 +11,11 @@ from .enhanced_faiss_store import EnhancedFaissStore
 
 # 重排序功能
 from .rerank_service import (
-    RerankService,
     SimpleReranker,
-    HybridReranker,
     APIReranker,
     EnhancedHybridReranker,
     RerankStrategyFactory,
+    AsyncRerankWrapper,
 )
 
 # API重排序
@@ -24,8 +23,7 @@ from .api_rerank_config import APIRerankConfig
 from .api_rerank_service import APIRerankService
 from .api_clients import APIClientFactory
 
-# 配置和示例
-from .config_examples import CONFIG_EXAMPLES, get_config_example
+# 配置适配器
 from .config_adapter import (
     create_rerank_config_from_astrbot,
     create_reranker_from_astrbot_config,
@@ -47,19 +45,15 @@ __all__ = [
     # 存储实现 - 仅保留增强型
     "EnhancedFaissStore",
     # 重排序功能
-    "RerankService",
     "SimpleReranker",
-    "HybridReranker",
     "APIReranker",
     "EnhancedHybridReranker",
     "RerankStrategyFactory",
+    "AsyncRerankWrapper",
     # API重排序
     "APIRerankConfig",
     "APIRerankService",
     "APIClientFactory",
-    # 配置和示例
-    "CONFIG_EXAMPLES",
-    "get_config_example",
     # 配置适配器
     "create_rerank_config_from_astrbot",
     "create_reranker_from_astrbot_config",
