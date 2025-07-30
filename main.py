@@ -70,9 +70,9 @@ class KnowledgeBasePlugin(Star):
 
             # --- 依赖注入顺序 ---
             # 1. 初始化嵌入工具
-            from .utils.embedding import EmbeddingSolutionHelper
+            from .utils.embedding import EmbeddingUtil
 
-            embedding_helper = EmbeddingSolutionHelper(self.plugin_config.embedding)
+            embedding_helper = EmbeddingUtil(self.plugin_config.embedding)
 
             # 2. 初始化向量数据库
             from .vector_store.enhanced_faiss_store import EnhancedFaissStore

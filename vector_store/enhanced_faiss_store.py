@@ -29,7 +29,7 @@ from .base import (
     DEFAULT_BATCH_SIZE,
     MAX_RETRIES,
 )
-from ..utils.embedding import EmbeddingSolutionHelper
+from ..utils.embedding import EmbeddingUtil
 from astrbot.api import logger
 
 
@@ -56,6 +56,7 @@ class EnhancedDocument(Document):
     doc_hash: str = ""  # 文档哈希
     created_at: float = 0.0  # 创建时间戳
     updated_at: float = 0.0  # 更新时间戳
+    vector_id: int = -1  # 向量ID
     graph_nodes: List[str] = field(default_factory=list)  # 知识图谱节点
     graph_edges: List[Tuple[str, str, str]] = field(default_factory=list)  # 知识图谱边
 
@@ -198,6 +199,7 @@ class SQLiteMetadataStore:
                     doc_hash=row["doc_hash"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    vector_id=row["vector_id"],
                 )
         return None
 
@@ -277,6 +279,7 @@ class SQLiteMetadataStore:
                     doc_hash=row["doc_hash"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    vector_id=row["vector_id"],
                 )
                 documents.append(doc)
 
@@ -452,7 +455,7 @@ class EnhancedFaissStore(VectorDBBase):
 
     def __init__(
         self,
-        embedding_util: EmbeddingSolutionHelper,
+        embedding_util: EmbeddingUtil,
         data_path: str,
         config: Optional[StorageConfig] = None,
     ):
@@ -583,6 +586,7 @@ class EnhancedFaissStore(VectorDBBase):
             doc_ids = []
             for i, doc in enumerate(valid_docs):
                 doc.id = f"{collection_name}_{start_id + i}"
+                doc.vector_id = start_id + i  # 设置向量ID
                 self.metadata_store.add_document(doc, start_id + i)
                 doc_ids.append(doc.id)
 
@@ -769,6 +773,16 @@ class EnhancedFaissStore(VectorDBBase):
         count = metadata_store.count_documents()
         metadata_store.close()
         return count
+
+    @contextmanager
+    def get_metadata_store_for_collection(self, collection_name: str):
+        """获取指定集合的元数据存储的上下文管理器"""
+        db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+        store = SQLiteMetadataStore(db_path)
+        try:
+            yield store
+        finally:
+            store.close()
 
     async def close(self):
         """关闭存储"""
