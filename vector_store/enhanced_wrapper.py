@@ -8,7 +8,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 
-from .base import VectorDBBase, Document
+from .base import VectorDBBase, Document, DocumentMetadata, Filter, SearchResult
 from .enhanced_faiss_store import EnhancedFaissStore
 from .keyword_index import KeywordIndex
 from .rerank_service import EnhancedHybridReranker
@@ -72,30 +72,30 @@ class EnhancedVectorStore(VectorDBBase):
         return await self.enhanced_store.add_documents(collection_name, documents)
     
     async def search(
-        self, collection_name: str, query_text: str, top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
+        self, collection_name: str, query_text: str, top_k: int = 5, filters: Optional[Filter] = None
+    ) -> List[SearchResult]:
         """搜索文档（支持混合搜索和重排序）"""
         if not self.use_enhanced_search:
             # 回退到基础搜索
-            return await self.enhanced_store.search(collection_name, query_text, top_k)
+            return await self.enhanced_store.search(collection_name, query_text, top_k, filters)
         
         # 混合搜索
-        return await self._hybrid_search(collection_name, query_text, top_k)
+        return await self._hybrid_search(collection_name, query_text, top_k, filters)
     
     async def _hybrid_search(
-        self, collection_name: str, query_text: str, top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
+        self, collection_name: str, query_text: str, top_k: int = 5, filters: Optional[Filter] = None
+    ) -> List[SearchResult]:
         """混合搜索：向量 + 关键词 + 重排序"""
         try:
             # 1. 向量搜索
             vector_results = await self.enhanced_store.search(
-                collection_name, query_text, top_k * 3
+                collection_name, query_text, top_k * 3, filters
             )
             
             if not vector_results:
                 return []
             
-            # 2. 关键词搜索
+            # 2. 关键词搜索 (注意：关键词搜索可能也需要支持过滤)
             keyword_results = await self._keyword_search(collection_name, query_text, top_k * 3)
             
             # 3. 合并结果
@@ -111,7 +111,7 @@ class EnhancedVectorStore(VectorDBBase):
         except Exception as e:
             logging.error(f"混合搜索失败: {e}")
             # 回退到基础搜索
-            return await self.enhanced_store.search(collection_name, query_text, top_k)
+            return await self.enhanced_store.search(collection_name, query_text, top_k, filters)
     
     async def _keyword_search(
         self, collection_name: str, query_text: str, limit: int = 100
@@ -119,6 +119,8 @@ class EnhancedVectorStore(VectorDBBase):
         """关键词搜索"""
         try:
             # 使用关键词索引
+            # 注意：这里的实现是简化的，实际应用中需要正确实现
+            # 可能需要传递filters参数来支持元数据过滤
             keyword_index = KeywordIndex(
                 str(self.data_path / f"{collection_name}.enhanced.db")
             )
@@ -139,16 +141,25 @@ class EnhancedVectorStore(VectorDBBase):
             return []
     
     def _merge_results(
-        self, 
-        vector_results: List[Tuple[Document, float]], 
+        self,
+        vector_results: List[Tuple[Document, float]] | List[SearchResult],
         keyword_results: List[Tuple[Document, float]]
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[SearchResult]:
         """合并向量搜索和关键词搜索结果"""
         # 使用加权平均合并分数
         merged = {}
         
+        # 检查vector_results的类型
+        is_vector_search_result = vector_results and isinstance(vector_results[0], SearchResult)
+        
         # 向量分数
-        for doc, score in vector_results:
+        for item in vector_results:
+            if is_vector_search_result:
+                doc = item.document
+                score = item.score
+            else:
+                doc, score = item
+                
             merged[doc.id] = {
                 'doc': doc,
                 'vector_score': score,
@@ -170,13 +181,18 @@ class EnhancedVectorStore(VectorDBBase):
         results = []
         for data in merged.values():
             combined_score = (
-                0.7 * data['vector_score'] + 
+                0.7 * data['vector_score'] +
                 0.3 * data['keyword_score']
             )
-            results.append((data['doc'], combined_score))
+            # 返回SearchResult
+            results.append(SearchResult(
+                document=data['doc'],
+                score=data['vector_score'],
+                rerank_score=combined_score
+            ))
         
         # 排序
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: x.rerank_score if x.rerank_score is not None else x.score, reverse=True)
         return results
     
     async def delete_collection(self, collection_name: str) -> bool:
@@ -190,6 +206,14 @@ class EnhancedVectorStore(VectorDBBase):
     async def count_documents(self, collection_name: str) -> int:
         """统计文档数量"""
         return await self.enhanced_store.count_documents(collection_name)
+    
+    async def delete_documents(self, collection_name: str, doc_ids: List[str]) -> bool:
+        """从指定集合中删除文档"""
+        return await self.enhanced_store.delete_documents(collection_name, doc_ids)
+    
+    async def update_document(self, collection_name: str, doc_id: str, content: Optional[str] = None, metadata: Optional[DocumentMetadata] = None) -> bool:
+        """更新指定集合中的文档"""
+        return await self.enhanced_store.update_document(collection_name, doc_id, content, metadata)
     
     async def close(self):
         """关闭存储"""

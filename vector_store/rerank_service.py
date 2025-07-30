@@ -9,7 +9,7 @@ from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
 import logging
 
-from .base import Document
+from .base import Document, SearchResult
 from .api_rerank_config import APIRerankConfig
 from .api_rerank_service import APIRerankService
 
@@ -24,22 +24,31 @@ class SimpleReranker:
         }
     
     async def rerank(
-        self, 
-        query: str, 
-        documents: List[Tuple[Document, float]], 
+        self,
+        query: str,
+        documents: List[Tuple[Document, float]] | List[SearchResult],
         keyword_scores: Optional[List[Tuple[str, float]]] = None,
         top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, float]] | List[SearchResult]:
         """基于规则的重排序"""
         if not documents:
             return []
+        
+        # 检查输入类型
+        is_search_result = isinstance(documents[0], SearchResult) if documents else False
         
         # 构建关键词分数映射
         keyword_map = dict(keyword_scores) if keyword_scores else {}
         
         # 计算综合分数
         reranked = []
-        for doc, vector_score in documents:
+        for item in documents:
+            if is_search_result:
+                doc = item.document
+                vector_score = item.score
+            else:
+                doc, vector_score = item
+            
             # 关键词分数
             keyword_score = keyword_map.get(doc.id, 0.0)
             
@@ -53,10 +62,18 @@ class SimpleReranker:
                 self.weights['recency_score'] * recency_score
             )
             
-            reranked.append((doc, combined_score))
+            if is_search_result:
+                # 保留原始的rerank_score，如果有的话
+                reranked.append(SearchResult(document=doc, score=vector_score, rerank_score=combined_score))
+            else:
+                reranked.append((doc, combined_score))
         
         # 排序
-        reranked.sort(key=lambda x: x[1], reverse=True)
+        if is_search_result:
+            reranked.sort(key=lambda x: x.rerank_score if x.rerank_score is not None else x.score, reverse=True)
+        else:
+            reranked.sort(key=lambda x: x[1], reverse=True)
+            
         return reranked[:top_k]
     
     def _calculate_recency_score(self, metadata: Dict[str, Any]) -> float:
@@ -85,11 +102,19 @@ class APIReranker:
     async def rerank(
         self,
         query: str,
-        documents: List[Tuple[Document, float]],
+        documents: List[Tuple[Document, float]] | List[SearchResult],
         top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, float]] | List[SearchResult]:
         """使用API服务重排序"""
-        return await self.api_service.rerank(query, documents, top_k)
+        # API服务可能只支持Tuple[Document, float]格式
+        # 如果输入是SearchResult，需要转换
+        if documents and isinstance(documents[0], SearchResult):
+            converted_docs = [(item.document, item.score) for item in documents]
+            result = await self.api_service.rerank(query, converted_docs, top_k)
+            # 将结果转换回SearchResult
+            return [SearchResult(document=doc, score=score, rerank_score=score) for doc, score in result]
+        else:
+            return await self.api_service.rerank(query, documents, top_k)
     
     def get_config(self) -> Dict[str, Any]:
         """获取配置信息"""
@@ -121,11 +146,11 @@ class EnhancedHybridReranker:
     async def rerank(
         self,
         query: str,
-        documents: List[Tuple[Document, float]],
+        documents: List[Tuple[Document, float]] | List[SearchResult],
         keyword_scores: Optional[List[Tuple[str, float]]] = None,
         top_k: int = 5,
         strategy: str = None
-    ) -> List[Tuple[Document, float]]:
+    ) -> List[Tuple[Document, float]] | List[SearchResult]:
         """增强的混合重排序"""
         if not documents:
             return []

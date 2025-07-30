@@ -274,14 +274,13 @@ class KnowledgeBaseWebAPI:
 
             # 格式化结果以便前端展示
             formatted_results = []
-            for i, doc in enumerate(results):
-                doc, score = doc
+            for i, result in enumerate(results):
                 formatted_results.append(
                     {
-                        "id": doc.id,
-                        "content": doc.text_content,
-                        "metadata": doc.metadata,
-                        "score": score,
+                        "id": result.document.id,
+                        "content": result.document.text_content,
+                        "metadata": result.document.metadata,
+                        "score": result.score,
                     }
                 )
             return Response().ok(data=formatted_results).__dict__

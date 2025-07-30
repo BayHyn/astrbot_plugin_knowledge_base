@@ -63,13 +63,13 @@ class LLMEnhancerService:
             return
 
         retrieved_contexts_list = []
-        for doc, score in search_results:
-            if score >= self.settings.kb_llm_min_similarity_score:
-                source_info = doc.metadata.get("source", "未知来源")
-                context_item = f"- 内容: {doc.text_content} (来源: {source_info}, 相关度: {score:.2f})"
+        for result in search_results:
+            if result.score >= self.settings.kb_llm_min_similarity_score:
+                source_info = result.document.metadata.get("source", "未知来源")
+                context_item = f"- 内容: {result.document.text_content} (来源: {source_info}, 相关度: {result.score:.2f})"
                 retrieved_contexts_list.append(context_item)
             else:
-                logger.debug(f"文档 '{doc.text_content[:30]}...' 的相关度 {score:.2f} 低于阈值 {self.settings.kb_llm_min_similarity_score}，已忽略。")
+                logger.debug(f"文档 '{result.document.text_content[:30]}...' 的相关度 {result.score:.2f} 低于阈值 {self.settings.kb_llm_min_similarity_score}，已忽略。")
 
         if not retrieved_contexts_list:
             logger.info(f"所有检索到的知识库内容都低于相关度阈值 {self.settings.kb_llm_min_similarity_score}，不执行增强。")

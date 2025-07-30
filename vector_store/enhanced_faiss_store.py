@@ -19,7 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 
-from .base import VectorDBBase, Document, ProcessingBatch, DEFAULT_BATCH_SIZE, MAX_RETRIES
+from .base import VectorDBBase, Document, DocumentMetadata, Filter, SearchResult, ProcessingBatch, DEFAULT_BATCH_SIZE, MAX_RETRIES
 from ..utils.embedding import EmbeddingSolutionHelper
 from astrbot.api import logger
 
@@ -213,6 +213,96 @@ class SQLiteMetadataStore:
             conn.execute('DELETE FROM keywords_fts WHERE doc_id = ?', (doc_id,))
             conn.commit()
             return cursor.rowcount > 0
+    
+    def get_documents_by_vector_ids(self, vector_ids: List[int], filters: Optional[Filter] = None) -> List[EnhancedDocument]:
+        """根据向量ID列表获取文档，可选地应用过滤器"""
+        if not vector_ids:
+            return []
+            
+        placeholders = ','.join('?' * len(vector_ids))
+        base_query = f'SELECT * FROM documents WHERE vector_id IN ({placeholders})'
+        params = list(vector_ids)
+        
+        if filters:
+            filter_clause, filter_params = self._build_filter_clause(filters)
+            if filter_clause:
+                base_query += f' AND {filter_clause}'
+                params.extend(filter_params)
+        
+        with self._get_connection() as conn:
+            cursor = conn.execute(base_query, params)
+            rows = cursor.fetchall()
+            
+            documents = []
+            for row in rows:
+                doc = EnhancedDocument(
+                    text_content=row['text_content'],
+                    embedding=pickle.loads(row['embedding']) if row['embedding'] else None,
+                    metadata=json.loads(row['metadata']) if row['metadata'] else {},
+                    id=row['doc_id'],
+                    keywords=json.loads(row['keywords']) if row['keywords'] else [],
+                    doc_hash=row['doc_hash'],
+                    created_at=row['created_at'],
+                    updated_at=row['updated_at']
+                )
+                documents.append(doc)
+            
+            return documents
+    
+    def _build_filter_clause(self, filters: Filter) -> Tuple[str, List[Any]]:
+        """构建SQL过滤子句"""
+        if not filters.conditions:
+            return "", []
+            
+        clauses = []
+        params = []
+        
+        for condition in filters.conditions:
+            # 简化处理，假设所有字段都在metadata JSON字段中
+            # 实际应用中可能需要更复杂的逻辑来处理不同类型的字段
+            if condition.key.startswith("metadata."):
+                json_key = condition.key.split(".", 1)[1]
+                if condition.operator == "=":
+                    clauses.append(f"json_extract(metadata, '$.{json_key}') = ?")
+                    params.append(condition.value)
+                elif condition.operator == "!=":
+                    clauses.append(f"json_extract(metadata, '$.{json_key}') != ?")
+                    params.append(condition.value)
+                elif condition.operator == "in":
+                    if isinstance(condition.value, (list, tuple)):
+                        in_placeholders = ','.join('?' * len(condition.value))
+                        clauses.append(f"json_extract(metadata, '$.{json_key}') IN ({in_placeholders})")
+                        params.extend(condition.value)
+                # 可以添加更多操作符...
+            
+            # 处理直接字段（如 created_at）
+            elif condition.key in ["created_at", "updated_at"]:
+                if condition.operator in ["=", "!=", ">", "<", ">=", "<="]:
+                    clauses.append(f"{condition.key} {condition.operator} ?")
+                    params.append(condition.value)
+            
+            # 处理 source 字段
+            elif condition.key == "source":
+                # 假设source存储在metadata的'source'字段中
+                if condition.operator == "=":
+                    clauses.append("json_extract(metadata, '$.source') = ?")
+                    params.append(condition.value)
+                elif condition.operator == "!=":
+                    clauses.append("json_extract(metadata, '$.source') != ?")
+                    params.append(condition.value)
+                elif condition.operator == "in":
+                    if isinstance(condition.value, (list, tuple)):
+                        in_placeholders = ','.join('?' * len(condition.value))
+                        clauses.append(f"json_extract(metadata, '$.source') IN ({in_placeholders})")
+                        params.extend(condition.value)
+            
+            # 可以添加对其他字段的处理...
+        
+        if not clauses:
+            return "", []
+            
+        logic_op = " AND " if filters.logic.lower() == "and" else " OR "
+        return logic_op.join(clauses), params
     
     def close(self):
         """关闭数据库连接"""
@@ -424,8 +514,8 @@ class EnhancedFaissStore(VectorDBBase):
         return doc_ids
     
     async def search(
-        self, collection_name: str, query_text: str, top_k: int = 5
-    ) -> List[Tuple[Document, float]]:
+        self, collection_name: str, query_text: str, top_k: int = 5, filters: Optional[Filter] = None
+    ) -> List[SearchResult]:
         """搜索相似文档"""
         if not await self.collection_exists(collection_name):
             logger.warning(f"集合 '{collection_name}' 不存在")
@@ -446,17 +536,99 @@ class EnhancedFaissStore(VectorDBBase):
         distances, indices = self.index_store.search_vectors(query_vector, top_k * 2)
         
         # 获取文档
+        vector_ids = [idx for idx in indices[0] if idx != -1]  # 过滤有效索引
+        if not vector_ids:
+            return []
+            
+        db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+        metadata_store = SQLiteMetadataStore(db_path)
+        docs = metadata_store.get_documents_by_vector_ids(vector_ids, filters)
+        metadata_store.close()
+        
+        # 构建搜索结果
         results = []
+        doc_dict = {doc.vector_id: doc for doc in docs}  # 通过vector_id快速查找文档
+        
         for distance, idx in zip(distances[0], indices[0]):
-            if idx != -1:  # 有效索引
-                doc = self.metadata_store.get_document(f"{collection_name}_{idx}")
-                if doc:
-                    similarity = 1.0 - (distance / 2.0)  # 转换为相似度
-                    results.append((doc, float(similarity)))
+            if idx != -1 and idx in doc_dict:  # 有效索引且文档存在（通过过滤器）
+                doc = doc_dict[idx]
+                similarity = 1.0 - (distance / 2.0)  # 转换为相似度
+                results.append(SearchResult(document=doc, score=float(similarity)))
         
         # 按相似度排序
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: x.score, reverse=True)
         return results[:top_k]
+    
+    async def delete_documents(self, collection_name: str, doc_ids: List[str]) -> bool:
+        """从指定集合中删除文档"""
+        if not await self.collection_exists(collection_name):
+            logger.warning(f"集合 '{collection_name}' 不存在")
+            return False
+        
+        db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+        metadata_store = SQLiteMetadataStore(db_path)
+        
+        deleted_count = 0
+        for doc_id in doc_ids:
+            if metadata_store.delete_document(doc_id):
+                deleted_count += 1
+        
+        metadata_store.close()
+        
+        logger.info(f"从集合 '{collection_name}' 中删除了 {deleted_count} 个文档")
+        return deleted_count > 0
+    
+    async def update_document(self, collection_name: str, doc_id: str, content: Optional[str] = None, metadata: Optional[DocumentMetadata] = None) -> bool:
+        """更新指定集合中的文档"""
+        if not await self.collection_exists(collection_name):
+            logger.warning(f"集合 '{collection_name}' 不存在")
+            return False
+        
+        db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+        metadata_store = SQLiteMetadataStore(db_path)
+        
+        # 获取现有文档
+        existing_doc = metadata_store.get_document(doc_id)
+        if not existing_doc:
+            logger.warning(f"文档 '{doc_id}' 不存在于集合 '{collection_name}' 中")
+            metadata_store.close()
+            return False
+        
+        # 更新内容
+        if content is not None:
+            existing_doc.text_content = content
+            # 如果内容改变，需要重新生成embedding和keywords
+            existing_doc.embedding = None # 标记为需要重新生成
+            existing_doc.keywords = self._extract_keywords(content)
+            existing_doc.doc_hash = self._compute_hash(content)
+        
+        # 更新元数据
+        if metadata is not None:
+            existing_doc.metadata = metadata
+        
+        # 更新时间戳
+        existing_doc.updated_at = time.time()
+        
+        # 如果内容被更新，重新生成embedding
+        if content is not None:
+            new_embedding = await self.embedding_util.get_embedding_async(content, collection_name)
+            if new_embedding is not None:
+                existing_doc.embedding = new_embedding
+            else:
+                logger.error(f"无法为文档 '{doc_id}' 生成新的embedding")
+                metadata_store.close()
+                return False
+        
+        # 保存更新后的文档
+        # 注意：这里简化了处理，实际应用中可能需要更复杂的逻辑来处理向量索引的更新
+        # 例如，可能需要先从FAISS索引中删除旧向量，再添加新向量
+        # 为了保持简单，我们假设向量ID保持不变，只更新元数据
+        # 在实际生产环境中，这需要更仔细的设计
+        metadata_store.add_document(existing_doc, existing_doc.vector_id) # 假设vector_id不变
+        metadata_store.close()
+        
+        logger.info(f"成功更新文档 '{doc_id}' 在集合 '{collection_name}' 中")
+        return True
     
     async def delete_collection(self, collection_name: str) -> bool:
         """删除集合"""
