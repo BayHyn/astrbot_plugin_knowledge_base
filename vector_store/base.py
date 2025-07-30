@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
-from ..utils.embedding import EmbeddingSolutionHelper
+from ..utils.embedding import EmbeddingUtil
 
 DEFAULT_BATCH_SIZE = 10  # 默认批处理大小
 MAX_RETRIES = 3  # 最大重试次数
@@ -63,7 +63,7 @@ class ProcessingBatch:
 
 
 class VectorDBBase(ABC):
-    def __init__(self, embedding_util: EmbeddingSolutionHelper, data_path: str):
+    def __init__(self, embedding_util: EmbeddingUtil, data_path: str):
         self.embedding_util = embedding_util  # EmbeddingUtil 实例
         self.data_path = data_path  # 数据存储路径 (主要用于 Faiss Lite)
 

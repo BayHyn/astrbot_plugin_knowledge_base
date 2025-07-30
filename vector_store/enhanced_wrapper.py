@@ -14,7 +14,7 @@ from .keyword_index import KeywordIndex
 from .rerank_service import EnhancedHybridReranker
 from .api_rerank_config import APIRerankConfig
 from .migration_tool import MigrationTool
-from ..utils.embedding import EmbeddingSolutionHelper
+from ..utils.embedding import EmbeddingUtil
 
 
 class EnhancedVectorStore(VectorDBBase):
@@ -25,7 +25,7 @@ class EnhancedVectorStore(VectorDBBase):
 
     def __init__(
         self,
-        embedding_util: EmbeddingSolutionHelper,
+        embedding_util: EmbeddingUtil,
         data_path: str,
         rerank_config: Optional[Dict[str, Any]] = None,
     ):
@@ -277,7 +277,7 @@ class EnhancedVectorStore(VectorDBBase):
 
 # 工厂函数
 def create_enhanced_store(
-    embedding_util: EmbeddingSolutionHelper, data_path: str, use_enhanced: bool = True
+    embedding_util: EmbeddingUtil, data_path: str, use_enhanced: bool = True
 ) -> VectorDBBase:
     """
     创建增强型存储实例
