@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import asyncio
 from astrbot.api.star import Context
 from .services.document_service import DocumentService
 from .services.kb_service import KnowledgeBaseService
@@ -31,6 +32,7 @@ class KnowledgeBaseWebAPI:
         self.user_prefs_handler = self.kb_service.user_prefs_handler
         self.fp = self.document_service.file_parser
         self.text_splitter = self.document_service.text_splitter
+        self.tasks = {}
 
         if VERSION < "3.5.13":
             raise RuntimeError("AstrBot 版本过低，无法支持此插件，请升级 AstrBot。")
@@ -65,6 +67,12 @@ class KnowledgeBaseWebAPI:
             ["GET"],
             "删除指定集合",
         )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/task_status",
+            self.get_task_status,
+            ["GET"],
+            "获取异步任务的状态",
+        )
 
     async def create_collection(self):
         """
@@ -77,6 +85,7 @@ class KnowledgeBaseWebAPI:
         emoji = data.get("emoji", "🙂")
         description = data.get("description", "")
         embedding_provider_id = data.get("embedding_provider_id", None)
+        logger.info(f"收到创建知识库请求: {collection_name}")
         if not collection_name:
             return Response().error("缺少集合名称").__dict__
         if await self.vec_db.collection_exists(collection_name):
@@ -115,6 +124,7 @@ class KnowledgeBaseWebAPI:
         列出所有知识库集合。
         :return: 集合列表
         """
+        logger.info("收到列出知识库集合请求")
         try:
             collections = await self.vec_db.list_collections()
             result = []
@@ -151,65 +161,86 @@ class KnowledgeBaseWebAPI:
         collection_name = (await request.form).get("collection_name")
         chunk_size = (await request.form).get("chunk_size", None)
         overlap = (await request.form).get("chunk_overlap", None)
+
+        logger.info(f"收到向知识库 '{collection_name}' 添加文件的请求: {upload_file.filename}")
+
         if not upload_file or not collection_name:
             return Response().error("缺少知识库名称").__dict__
         if not await self.vec_db.collection_exists(collection_name):
             return Response().error("目标知识库不存在").__dict__
 
+        task_id = f"task_{uuid.uuid4()}"
+        self.tasks[task_id] = {"status": "pending", "result": None}
+        logger.info(f"创建异步任务 {task_id} 用于处理文件 {upload_file.filename}")
+
+        asyncio.create_task(
+            self._process_file_asynchronously(
+                task_id,
+                upload_file,
+                collection_name,
+                chunk_size,
+                overlap,
+            )
+        )
+
+        return Response().ok(data={"task_id": task_id}, message="文件上传成功，正在后台处理。").__dict__
+
+    async def _process_file_asynchronously(
+        self, task_id, upload_file, collection_name, chunk_size_str, overlap_str
+    ):
+        self.tasks[task_id]["status"] = "running"
+        path = None
         try:
-            chunk_size = int(chunk_size) if chunk_size else None
-            overlap = int(overlap) if overlap else None
-            path = os.path.join(get_astrbot_data_path(), "temp", upload_file.filename)
+            logger.info(f"[Task {task_id}] 开始处理文件: {upload_file.filename}")
+            chunk_size = int(chunk_size_str) if chunk_size_str else None
+            overlap = int(overlap_str) if overlap_str else None
+            
+            temp_dir = os.path.join(get_astrbot_data_path(), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            path = os.path.join(temp_dir, upload_file.filename)
+            
             await upload_file.save(path)
+            logger.info(f"[Task {task_id}] 文件已保存到临时路径: {path}")
+
             content = await self.fp.parse_file_content(path)
             if not content:
                 raise ValueError("文件内容为空或不支持的格式")
+            logger.info(f"[Task {task_id}] 文件内容解析完成，长度: {len(content)}")
 
             chunks = self.text_splitter.split_text(
                 text=content, chunk_size=chunk_size, overlap=overlap
             )
             if not chunks:
-                raise Exception("chunk 内容为空")
+                raise Exception("文本分割后无有效内容 (chunk 内容为空)")
+            logger.info(f"[Task {task_id}] 文本分割完成，共 {len(chunks)} 个块")
 
             documents_to_add = [
                 Document(
                     text_content=chunk,
-                    metadata={
-                        "source": upload_file.filename,
-                        "user": "astrbot_webui",
-                    },
+                    metadata={"source": upload_file.filename, "user": "astrbot_webui"},
                 )
                 for chunk in chunks
             ]
 
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception as e:
-                logger.warning(f"删除临时文件失败: {str(e)}")
-
-            try:
-                doc_ids = await self.vec_db.add_documents(
-                    collection_name, documents_to_add
-                )
-                if not doc_ids:
-                    raise Exception("添加文档失败，返回的文档 ID 为空")
-                return (
-                    Response()
-                    .ok(
-                        data=doc_ids,
-                        message=f"成功从文件 '{upload_file.filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。",
-                    )
-                    .__dict__
-                )
-            except Exception as e:
-                raise Exception(f"添加文档失败: {str(e)}。")
+            doc_ids = await self.vec_db.add_documents(collection_name, documents_to_add)
+            if not doc_ids:
+                raise Exception("添加文档到数据库失败，返回的文档 ID 为空")
+            
+            message = f"成功从文件 '{upload_file.filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。"
+            self.tasks[task_id] = {"status": "success", "result": message}
+            logger.info(f"[Task {task_id}] 任务成功: {message}")
 
         except Exception as e:
-            logger.error(f"添加文档失败: {str(e)}")
-            if os.path.exists(path):
-                os.remove(path)
-            return Response().error(f"添加文档失败: {str(e)}").__dict__
+            error_message = f"处理文件时发生错误: {str(e)}"
+            self.tasks[task_id] = {"status": "failed", "result": error_message}
+            logger.error(f"[Task {task_id}] 任务失败: {error_message}", exc_info=True)
+        finally:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    logger.info(f"[Task {task_id}] 已删除临时文件: {path}")
+                except Exception as e:
+                    logger.warning(f"[Task {task_id}] 删除临时文件失败: {e}")
 
     async def search_documents(self):
         """
@@ -226,6 +257,8 @@ class KnowledgeBaseWebAPI:
             top_k = int(request.args.get("top_k", 5))
         except ValueError:
             top_k = 5
+        
+        logger.info(f"收到在知识库 '{collection_name}' 中搜索的请求: query='{query}', top_k={top_k}")
 
         # 验证必要参数
         if not collection_name or not query:
@@ -263,6 +296,7 @@ class KnowledgeBaseWebAPI:
         """
         # 从 URL 参数中获取查询参数
         collection_name = request.args.get("collection_name")
+        logger.info(f"收到删除知识库请求: {collection_name}")
 
         # 检查知识库是否存在
         if not await self.vec_db.collection_exists(collection_name):
@@ -271,7 +305,26 @@ class KnowledgeBaseWebAPI:
         try:
             # 执行删除
             await self.vec_db.delete_collection(collection_name)
+            logger.info(f"知识库 '{collection_name}' 删除成功")
             return Response().ok(f"删除 {collection_name} 成功").__dict__
         except Exception as e:
             logger.error(f"删除失败: {str(e)}")
             return Response().error(f"删除失败: {str(e)}").__dict__
+
+    async def get_task_status(self):
+        """
+        获取异步任务的状态。
+        :param task_id: 任务 ID
+        :return: 任务状态
+        """
+        task_id = request.args.get("task_id")
+        logger.debug(f"收到获取任务状态请求: {task_id}")
+        if not task_id:
+            return Response().error("缺少任务 ID").__dict__
+
+        task_info = self.tasks.get(task_id)
+        if not task_info:
+            return Response().error("任务不存在").__dict__
+
+        logger.debug(f"任务 {task_id} 状态: {task_info}")
+        return Response().ok(data=task_info).__dict__
