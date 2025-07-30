@@ -20,12 +20,7 @@ from .services.kb_service import KnowledgeBaseService
 from .services.llm_enhancer_service import LLMEnhancerService
 from .core.user_prefs_handler import UserPrefsHandler
 from .web_api import KnowledgeBaseWebAPI
-from .commands import (
-    general_commands,
-    add_commands,
-    search_commands,
-    manage_commands,
-)
+from .commands import general_commands
 
 
 @register(
@@ -172,70 +167,6 @@ class KnowledgeBasePlugin(Star):
         async for result in general_commands.handle_kb_help(self, event):
             yield result
 
-    @kb_group.group("add")
-    def kb_add_group(self, event: AstrMessageEvent):
-        """添加内容到知识库的子指令组"""
-        pass
-
-    @kb_add_group.command("text")
-    async def kb_add_text(
-        self,
-        event: AstrMessageEvent,
-        content: str,
-        collection_name: Optional[str] = None,
-    ):
-        """添加文本内容到知识库。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in add_commands.handle_add_text(
-            self, event, content, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_add_group.command("file")
-    async def kb_add_file(
-        self,
-        event: AstrMessageEvent,
-        path_or_url: str,
-        collection_name: Optional[str] = None,
-    ):
-        """从本地路径或 URL 添加文件内容到知识库。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in add_commands.handle_add_file(
-            self, event, path_or_url, collection_name
-        ):
-            yield result
-
-    @kb_group.command("search", alias={"搜索", "find", "查找"})
-    async def kb_search(
-        self,
-        event: AstrMessageEvent,
-        query: str,
-        top_k_str: Optional[str] = None,
-        collection_name: Optional[str] = None,
-    ):
-        """在知识库中搜索内容。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in search_commands.handle_search(
-            self, event, query, collection_name, top_k_str
-        ):
-            yield result
-
-    @kb_group.command("list", alias={"列表", "showall"})
-    async def kb_list_collections(self, event: AstrMessageEvent):
-        """列出所有可用的知识库"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_list_collections(self, event):
-            yield result
-
     @kb_group.command("current", alias={"当前"})
     async def kb_current_collection(self, event: AstrMessageEvent):
         """查看当前会话的默认知识库"""
@@ -268,125 +199,6 @@ class KnowledgeBasePlugin(Star):
         except Exception as e:
             logger.error(f"清除默认知识库时发生错误: {e}", exc_info=True)
             yield event.plain_result(f"清除默认知识库失败: {e}")
-
-    @kb_group.command("create", alias={"创建"})
-    async def kb_create_collection(self, event: AstrMessageEvent, collection_name: str):
-        """创建一个新的知识库"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_create_collection(
-            self, event, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_group.command("delete", alias={"删除"})
-    async def kb_delete_collection(
-        self,
-        event: AstrMessageEvent,
-        collection_name: str,
-        confirm: Optional[str] = None,
-    ):
-        """删除一个知识库及其所有内容 (危险操作! 仅管理员)。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-
-        if not collection_name:
-            yield event.plain_result(
-                "请输入要删除的知识库名称。用法: /kb delete <知识库名>"
-            )
-            return
-
-        if event.is_private_chat():
-            if confirm != "--confirm":
-                yield event.plain_result(
-                    f"⚠️ 操作确认 ⚠️\n"
-                    f"此操作将永久删除知识库 '{collection_name}' 及其包含的所有数据！此操作无法撤销！\n"
-                    f"当前处于私聊环境，指令与群聊中有所不同。\n\n"
-                    f"如果您确定要继续，请再次执行命令并添加 `--confirm` 参数:\n"
-                    f"`/kb delete {collection_name} --confirm`"
-                )
-                return
-            # 私聊中删除
-            await manage_commands.handle_delete_collection_logic(
-                self, event, collection_name
-            )
-            return
-
-        confirmation_phrase = f"确认删除{collection_name}"
-        yield event.plain_result(
-            f"警告：你确定要删除知识库 '{collection_name}' 及其所有内容吗？此操作不可恢复！\n"
-            f"请在 60 秒内回复 '{confirmation_phrase}' 来执行。"
-        )
-
-        @session_waiter(timeout=60, record_history_chains=False)
-        async def delete_confirmation_waiter(
-            controller: SessionController, confirm_event: AstrMessageEvent
-        ):
-            user_input = confirm_event.message_str.strip()
-            if user_input == confirmation_phrase:
-                await manage_commands.handle_delete_collection_logic(
-                    self, confirm_event, collection_name
-                )
-                controller.stop()
-            elif user_input.lower() in ["取消", "cancel"]:
-                await confirm_event.send(
-                    confirm_event.plain_result(
-                        f"已取消删除知识库 '{collection_name}'。"
-                    )
-                )
-                controller.stop()
-            else:
-                await confirm_event.send(
-                    confirm_event.plain_result(
-                        f"输入无效。如需删除，请回复 '{confirmation_phrase}'；如需取消，请回复 '取消'。"
-                    )
-                )
-                controller.keep(timeout=60, reset_timeout=True)
-
-        try:
-            await delete_confirmation_waiter(event)
-        except TimeoutError:
-            yield event.plain_result(
-                f"删除知识库 '{collection_name}' 操作超时，已自动取消。"
-            )
-        except Exception as e_sess:
-            logger.error(f"删除知识库确认会话发生错误: {e_sess}", exc_info=True)
-            yield event.plain_result(f"删除确认过程中发生错误: {e_sess}")
-        finally:
-            event.stop_event()
-
-    @kb_group.command("count", alias={"数量"})
-    async def kb_count_documents(
-        self, event: AstrMessageEvent, collection_name: Optional[str] = None
-    ):
-        """查看指定知识库的文档数量"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_count_documents(
-            self, event, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_group.command("migrate", alias={"迁移"})
-    async def kb_faiss_migrate(self, event: AstrMessageEvent):
-        """迁移旧的 .docs 文件到新的向量数据库格式"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        try:
-            data_path = self.persistent_data_root_path
-            await manage_commands.handle_migrate_files(self, event, data_path)
-            yield event.plain_result(
-                "迁移操作已完成。请使用/kb list命令以确认是否成功。"
-            )
-        except Exception as e:
-            logger.error(f"迁移过程中发生错误: {e}", exc_info=True)
-            yield event.plain_result(f"迁移失败: {e}")
 
     # --- Termination ---
     async def terminate(self):
