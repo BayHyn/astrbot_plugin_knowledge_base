@@ -82,3 +82,16 @@ class KnowledgeBaseService:
                 raise ValueError(
                     f"知识库 '{collection_name}' 不存在，且自动创建功能已禁用。"
                 )
+
+    async def set_user_default_collection(
+        self, event: AstrMessageEvent, collection_name: str
+    ):
+        """设置用户的默认知识库"""
+        if not collection_name:
+            raise ValueError("知识库名称不能为空")
+        
+        # 确保知识库存在
+        await self.ensure_collection_exists(collection_name, event)
+        
+        # 设置用户偏好
+        await self.user_prefs_handler.set_user_collection_pref(event, collection_name)
