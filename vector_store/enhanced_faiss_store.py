@@ -475,6 +475,29 @@ class EnhancedFaissStore(VectorDBBase):
         """初始化存储"""
         logger.info("初始化增强型FAISS存储...")
 
+    async def _ensure_collection_loaded(self, collection_name: str):
+        """确保指定的集合已被加载"""
+        if self.collection_name != collection_name or not self.metadata_store or not self.index_store:
+            # 需要切换或首次加载集合
+            if self.metadata_store:
+                self.metadata_store.close()
+            if self.index_store:
+                self.index_store.close()
+            
+            # 加载新集合
+            db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+            index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
+            
+            self.metadata_store = SQLiteMetadataStore(db_path)
+            self.index_store = FAISSIndexStore(index_path, self.config)
+            
+            if os.path.exists(index_path):
+                # 获取维度并初始化索引
+                dimension = self.embedding_util.get_dimensions(collection_name)
+                self.index_store.initialize(dimension)
+            
+            self.collection_name = collection_name
+
     async def create_collection(self, collection_name: str):
         """创建集合"""
         async with self._lock:
@@ -506,64 +529,68 @@ class EnhancedFaissStore(VectorDBBase):
         self, collection_name: str, documents: List[Document]
     ) -> List[str]:
         """添加文档到集合"""
-        if not await self.collection_exists(collection_name):
-            await self.create_collection(collection_name)
+        async with self._lock:
+            if not await self.collection_exists(collection_name):
+                await self.create_collection(collection_name)
 
-        if not documents:
-            return []
+            if not documents:
+                return []
 
-        # 准备增强文档
-        enhanced_docs = []
-        for doc in documents:
-            enhanced_doc = EnhancedDocument(
-                text_content=doc.text_content,
-                embedding=doc.embedding,
-                metadata=doc.metadata,
-                id=doc.id or "",
-                keywords=self._extract_keywords(doc.text_content),
-                doc_hash=self._compute_hash(doc.text_content),
-                created_at=time.time(),
-                updated_at=time.time(),
+            # 确保集合已加载
+            await self._ensure_collection_loaded(collection_name)
+
+            # 准备增强文档
+            enhanced_docs = []
+            for doc in documents:
+                enhanced_doc = EnhancedDocument(
+                    text_content=doc.text_content,
+                    embedding=doc.embedding,
+                    metadata=doc.metadata,
+                    id=doc.id or "",
+                    keywords=self._extract_keywords(doc.text_content),
+                    doc_hash=self._compute_hash(doc.text_content),
+                    created_at=time.time(),
+                    updated_at=time.time(),
+                )
+                enhanced_docs.append(enhanced_doc)
+
+            # 生成向量
+            texts = [doc.text_content for doc in enhanced_docs]
+            embeddings = await self.embedding_util.get_embeddings_async(
+                texts, collection_name
             )
-            enhanced_docs.append(enhanced_doc)
 
-        # 生成向量
-        texts = [doc.text_content for doc in enhanced_docs]
-        embeddings = await self.embedding_util.get_embeddings_async(
-            texts, collection_name
-        )
+            # 过滤有效向量
+            valid_docs = []
+            valid_embeddings = []
+            for doc, embedding in zip(enhanced_docs, embeddings):
+                if embedding is not None:
+                    doc.embedding = embedding
+                    valid_docs.append(doc)
+                    valid_embeddings.append(embedding)
 
-        # 过滤有效向量
-        valid_docs = []
-        valid_embeddings = []
-        for doc, embedding in zip(enhanced_docs, embeddings):
-            if embedding is not None:
-                doc.embedding = embedding
-                valid_docs.append(doc)
-                valid_embeddings.append(embedding)
+            if not valid_docs:
+                logger.warning("没有有效的向量可以添加")
+                return []
 
-        if not valid_docs:
-            logger.warning("没有有效的向量可以添加")
-            return []
+            # 添加到FAISS索引
+            vectors = np.array(valid_embeddings).astype("float32")
+            faiss.normalize_L2(vectors)
 
-        # 添加到FAISS索引
-        vectors = np.array(valid_embeddings).astype("float32")
-        faiss.normalize_L2(vectors)
+            start_id = self.index_store.add_vectors(vectors)
 
-        start_id = self.index_store.add_vectors(vectors)
+            # 添加到SQLite
+            doc_ids = []
+            for i, doc in enumerate(valid_docs):
+                doc.id = f"{collection_name}_{start_id + i}"
+                self.metadata_store.add_document(doc, start_id + i)
+                doc_ids.append(doc.id)
 
-        # 添加到SQLite
-        doc_ids = []
-        for i, doc in enumerate(valid_docs):
-            doc.id = f"{collection_name}_{start_id + i}"
-            self.metadata_store.add_document(doc, start_id + i)
-            doc_ids.append(doc.id)
+            # 保存索引
+            self.index_store.save_index()
 
-        # 保存索引
-        self.index_store.save_index()
-
-        logger.info(f"成功添加 {len(doc_ids)} 个文档到集合 '{collection_name}'")
-        return doc_ids
+            logger.info(f"成功添加 {len(doc_ids)} 个文档到集合 '{collection_name}'")
+            return doc_ids
 
     async def search(
         self,
@@ -573,47 +600,49 @@ class EnhancedFaissStore(VectorDBBase):
         filters: Optional[Filter] = None,
     ) -> List[SearchResult]:
         """搜索相似文档"""
-        if not await self.collection_exists(collection_name):
-            logger.warning(f"集合 '{collection_name}' 不存在")
-            return []
+        async with self._lock:
+            if not await self.collection_exists(collection_name):
+                logger.warning(f"集合 '{collection_name}' 不存在")
+                return []
 
-        # 获取查询向量
-        query_embedding = await self.embedding_util.get_embedding_async(
-            query_text, collection_name
-        )
-        if query_embedding is None:
-            logger.error("无法生成查询向量")
-            return []
+            # 确保集合已加载
+            await self._ensure_collection_loaded(collection_name)
 
-        # 向量搜索
-        query_vector = np.array([query_embedding]).astype("float32")
-        faiss.normalize_L2(query_vector)
+            # 获取查询向量
+            query_embedding = await self.embedding_util.get_embedding_async(
+                query_text, collection_name
+            )
+            if query_embedding is None:
+                logger.error("无法生成查询向量")
+                return []
 
-        distances, indices = self.index_store.search_vectors(query_vector, top_k * 2)
+            # 向量搜索
+            query_vector = np.array([query_embedding]).astype("float32")
+            faiss.normalize_L2(query_vector)
 
-        # 获取文档
-        vector_ids = [idx for idx in indices[0] if idx != -1]  # 过滤有效索引
-        if not vector_ids:
-            return []
+            distances, indices = self.index_store.search_vectors(query_vector, top_k * 2)
 
-        db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
-        metadata_store = SQLiteMetadataStore(db_path)
-        docs = metadata_store.get_documents_by_vector_ids(vector_ids, filters)
-        metadata_store.close()
+            # 获取文档
+            vector_ids = [idx for idx in indices[0] if idx != -1]  # 过滤有效索引
+            if not vector_ids:
+                return []
 
-        # 构建搜索结果
-        results = []
-        doc_dict = {doc.vector_id: doc for doc in docs}  # 通过vector_id快速查找文档
+            # 使用类的实例变量而不是创建新实例
+            docs = self.metadata_store.get_documents_by_vector_ids(vector_ids, filters)
 
-        for distance, idx in zip(distances[0], indices[0]):
-            if idx != -1 and idx in doc_dict:  # 有效索引且文档存在（通过过滤器）
-                doc = doc_dict[idx]
-                similarity = 1.0 - (distance / 2.0)  # 转换为相似度
-                results.append(SearchResult(document=doc, score=float(similarity)))
+            # 构建搜索结果
+            results = []
+            doc_dict = {doc.vector_id: doc for doc in docs}  # 通过vector_id快速查找文档
 
-        # 按相似度排序
-        results.sort(key=lambda x: x.score, reverse=True)
-        return results[:top_k]
+            for distance, idx in zip(distances[0], indices[0]):
+                if idx != -1 and idx in doc_dict:  # 有效索引且文档存在（通过过滤器）
+                    doc = doc_dict[idx]
+                    similarity = 1.0 - (distance / 2.0)  # 转换为相似度
+                    results.append(SearchResult(document=doc, score=float(similarity)))
+
+            # 按相似度排序
+            results.sort(key=lambda x: x.score, reverse=True)
+            return results[:top_k]
 
     async def delete_documents(self, collection_name: str, doc_ids: List[str]) -> bool:
         """从指定集合中删除文档"""
