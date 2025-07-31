@@ -48,10 +48,9 @@
                 "options": [
                     "auto",
                     "api",
-                    "cross_encoder",
                     "simple"
                 ],
-                "hint": "auto: 自动选择最佳策略；api: 使用API重排序；cross_encoder: 使用本地Cross-Encoder；simple: 使用简单重排序"
+                "hint": "auto: 自动选择最佳策略；api: 使用API重排序；simple: 使用简单重排序"
             },
             "api_provider": {
                 "description": "API重排序服务提供商",

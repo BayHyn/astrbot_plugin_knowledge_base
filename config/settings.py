@@ -13,7 +13,7 @@ class RerankSettings(BaseModel):
     """重排序配置"""
 
     strategy: str = Field(
-        "auto", description="重排序策略: auto, api, cross_encoder, simple"
+        "auto", description="重排序策略: auto, api, simple"
     )
     api_provider: str = Field("cohere", description="重排序 API 提供商")
     api_key: Optional[str] = Field(None, description="重排序 API 密钥")

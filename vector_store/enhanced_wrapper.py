@@ -306,7 +306,7 @@ class EnhancedStoreConfig:
     def __init__(self):
         self.auto_migrate = True
         self.use_enhanced_search = True
-        self.rerank_strategy = "auto"  # auto, api, cross_encoder, simple
+        self.rerank_strategy = "auto"  # auto, api, simple
         self.rerank_config = {
             "strategy": "auto",
             "api": {
@@ -317,12 +317,6 @@ class EnhancedStoreConfig:
                 "enable_cache": True,
                 "cache_ttl": 3600,
                 "fallback_strategy": "simple",
-            },
-            "cross_encoder": {
-                "model_name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                "batch_size": 32,
-                "max_length": 512,
-                "use_gpu": False,
             },
         }
         self.migration_config = {

@@ -29,12 +29,6 @@ def create_rerank_config_from_astrbot(config: dict) -> dict:
             "enable_cache": rerank_config.get("enable_cache", True),
             "cache_ttl": rerank_config.get("cache_ttl", 3600),
         },
-        "cross_encoder": {
-            "model_name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-            "batch_size": 32,
-            "max_length": 512,
-            "use_gpu": False,
-        },
     }
 
 
@@ -86,7 +80,7 @@ def validate_rerank_config(config: dict) -> tuple[bool, str]:
     """
     rerank_config = config.get("rerank_config", {})
     strategy = rerank_config.get("strategy", "auto")
-    if strategy not in ["auto", "api", "cross_encoder", "simple"]:
+    if strategy not in ["auto", "api", "simple"]:
         return False, f"无效的重排序策略: {strategy}"
 
     if strategy in ["api", "auto"]:
