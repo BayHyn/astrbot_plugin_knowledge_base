@@ -258,6 +258,73 @@ class JinaClient(BaseAPIClient):
             return RerankResponse(results=[], provider="jina", error=str(e))
 
 
+class OpenAIClient(BaseAPIClient):
+    """OpenAI兼容重排序API客户端"""
+
+    def __init__(self, config):
+        super().__init__(config)
+        if not config.api_url:
+            config.api_url = "https://api.openai.com/v1/rerank"
+
+    def _prepare_payload(self, request: RerankRequest) -> Dict[str, Any]:
+        """准备OpenAI兼容API请求负载"""
+        documents = [doc.text_content for doc, _ in request.documents]
+
+        payload = {
+            "query": request.query,
+            "documents": documents,
+            "top_k": min(request.top_k, len(documents)),
+        }
+
+        if self.config.model_name:
+            payload["model"] = self.config.model_name
+
+        return payload
+
+    def _parse_response(
+        self, response_data: Dict[str, Any], original_docs: List[Tuple[Document, float]]
+    ) -> List[Tuple[Document, float]]:
+        """解析OpenAI兼容API响应"""
+        results = []
+
+        # 支持多种响应格式
+        if "results" in response_data:
+            # 标准重排序响应格式
+            for result in response_data["results"]:
+                index = result.get("index", 0)
+                relevance_score = result.get("relevance_score", result.get("score", 0.0))
+
+                if index < len(original_docs):
+                    doc, _ = original_docs[index]
+                    results.append((doc, relevance_score))
+        elif "data" in response_data:
+            # OpenAI风格响应格式
+            for i, item in enumerate(response_data["data"]):
+                if i < len(original_docs):
+                    doc, _ = original_docs[i]
+                    relevance_score = item.get("relevance_score", item.get("score", 0.0))
+                    results.append((doc, relevance_score))
+        else:
+            raise ValueError("无效的API响应格式")
+
+        return results
+
+    async def rerank(self, request: RerankRequest) -> RerankResponse:
+        """执行OpenAI兼容重排序"""
+        try:
+            payload = self._prepare_payload(request)
+            response_data = await self._make_request(payload)
+            reranked_docs = self._parse_response(response_data, request.documents)
+
+            return RerankResponse(
+                results=reranked_docs, provider="openai", cached=False
+            )
+
+        except Exception as e:
+            logging.error(f"OpenAI兼容重排序失败: {e}")
+            return RerankResponse(results=[], provider="openai", error=str(e))
+
+
 class CustomAPIClient(BaseAPIClient):
     """自定义API客户端"""
 
@@ -308,7 +375,7 @@ class CustomAPIClient(BaseAPIClient):
 class APIClientFactory:
     """API客户端工厂"""
 
-    _clients = {"cohere": CohereClient, "jina": JinaClient, "custom": CustomAPIClient}
+    _clients = {"cohere": CohereClient, "jina": JinaClient, "openai": OpenAIClient, "custom": CustomAPIClient}
 
     @classmethod
     def create(cls, provider: str, config) -> BaseAPIClient:
