@@ -34,7 +34,7 @@ class KnowledgeBaseWebAPI:
         self.fp = self.document_service.file_parser
         self.text_splitter = self.document_service.text_splitter
         self.tasks = {}
-        
+
         # 文件处理锁，防止并发冲突
         self._file_processing_lock = threading.Lock()
         self._temp_file_counter = 0
@@ -90,6 +90,12 @@ class KnowledgeBaseWebAPI:
             self.get_task_status,
             ["GET"],
             "获取异步任务的状态",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/debug/repair_collection",
+            self.repair_collection_data,
+            ["GET"],
+            "修复集合数据（检查数据一致性）",
         )
 
     def _generate_safe_filename(self, original_filename: str) -> str:
@@ -164,21 +170,27 @@ class KnowledgeBaseWebAPI:
             corrupted_collections = await self.vec_db.cleanup_corrupted_collections()
             if corrupted_collections:
                 logger.info(f"清理了 {len(corrupted_collections)} 个损坏的集合文件")
-                
+
                 # 同时清理这些集合的元数据
                 if self.user_prefs_handler:
-                    collection_metadata = self.user_prefs_handler.user_collection_preferences.get("collection_metadata", {})
+                    collection_metadata = (
+                        self.user_prefs_handler.user_collection_preferences.get(
+                            "collection_metadata", {}
+                        )
+                    )
                     cleaned_metadata = False
                     for corrupted_name in corrupted_collections:
                         if corrupted_name in collection_metadata:
                             del collection_metadata[corrupted_name]
                             cleaned_metadata = True
                             logger.info(f"清理了损坏集合 '{corrupted_name}' 的元数据")
-                    
+
                     if cleaned_metadata:
-                        self.user_prefs_handler.user_collection_preferences["collection_metadata"] = collection_metadata
+                        self.user_prefs_handler.user_collection_preferences[
+                            "collection_metadata"
+                        ] = collection_metadata
                         await self.user_prefs_handler.save_user_preferences()
-            
+
             collections = await self.vec_db.list_collections()
             result = []
             collections_metadata = (
@@ -215,7 +227,9 @@ class KnowledgeBaseWebAPI:
         chunk_size = (await request.form).get("chunk_size", None)
         overlap = (await request.form).get("chunk_overlap", None)
 
-        logger.info(f"收到向知识库 '{collection_name}' 添加文件的请求: {upload_file.filename}")
+        logger.info(
+            f"收到向知识库 '{collection_name}' 添加文件的请求: {upload_file.filename}"
+        )
 
         if not upload_file or not collection_name:
             return Response().error("缺少知识库名称").__dict__
@@ -227,14 +241,14 @@ class KnowledgeBaseWebAPI:
             # 生成安全的临时文件路径
             temp_dir = os.path.join(get_astrbot_data_path(), "temp")
             os.makedirs(temp_dir, exist_ok=True)
-            
+
             safe_filename = self._generate_safe_filename(upload_file.filename)
             temp_path = os.path.join(temp_dir, safe_filename)
-            
+
             # 立即保存文件
             await upload_file.save(temp_path)
             logger.info(f"文件已保存到临时路径: {temp_path}")
-            
+
         except Exception as e:
             logger.error(f"保存上传文件失败: {e}")
             return Response().error(f"保存文件失败: {str(e)}").__dict__
@@ -254,28 +268,46 @@ class KnowledgeBaseWebAPI:
             )
         )
 
-        return Response().ok(data={"task_id": task_id}, message="文件上传成功，正在后台处理。").__dict__
+        return (
+            Response()
+            .ok(data={"task_id": task_id}, message="文件上传成功，正在后台处理。")
+            .__dict__
+        )
 
     async def _process_file_asynchronously(
-        self, task_id, temp_path, original_filename, collection_name, chunk_size_str, overlap_str
+        self,
+        task_id,
+        temp_path,
+        original_filename,
+        collection_name,
+        chunk_size_str,
+        overlap_str,
     ):
         """异步处理文件，增强容错性和并发安全性"""
         self.tasks[task_id]["status"] = "running"
-        
+
         try:
             logger.info(f"[Task {task_id}] 开始处理文件: {original_filename}")
-            
+
             # 参数验证和转换
             try:
-                chunk_size = int(chunk_size_str) if chunk_size_str else self.plugin_config.text_chunk_size
-                overlap = int(overlap_str) if overlap_str else self.plugin_config.text_chunk_overlap
+                chunk_size = (
+                    int(chunk_size_str)
+                    if chunk_size_str
+                    else self.plugin_config.text_chunk_size
+                )
+                overlap = (
+                    int(overlap_str)
+                    if overlap_str
+                    else self.plugin_config.text_chunk_overlap
+                )
             except (ValueError, TypeError) as e:
                 raise ValueError(f"无效的分块参数: {e}")
-            
+
             # 验证文件是否存在
             if not os.path.exists(temp_path):
                 raise ValueError("临时文件不存在")
-            
+
             logger.info(f"[Task {task_id}] 开始解析文件: {temp_path}")
 
             # 解析文件内容
@@ -311,7 +343,7 @@ class KnowledgeBaseWebAPI:
                         "user": "astrbot_webui",
                         "upload_time": int(time.time()),
                         "chunk_index": i,
-                        "total_chunks": len(chunks)
+                        "total_chunks": len(chunks),
                     },
                 )
                 for i, chunk in enumerate(chunks)
@@ -319,12 +351,14 @@ class KnowledgeBaseWebAPI:
 
             # 添加文档到向量数据库
             try:
-                doc_ids = await self.vec_db.add_documents(collection_name, documents_to_add)
+                doc_ids = await self.vec_db.add_documents(
+                    collection_name, documents_to_add
+                )
                 if not doc_ids:
                     raise ValueError("向量数据库返回空文档ID列表")
             except Exception as e:
                 raise ValueError(f"添加文档到数据库失败: {e}")
-            
+
             success_message = f"成功从文件 '{original_filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。"
             self.tasks[task_id] = {"status": "success", "result": success_message}
             logger.info(f"[Task {task_id}] 任务成功: {success_message}")
@@ -357,8 +391,10 @@ class KnowledgeBaseWebAPI:
             top_k = int(request.args.get("top_k", 5))
         except ValueError:
             top_k = 5
-        
-        logger.info(f"收到在知识库 '{collection_name}' 中搜索的请求: query='{query}', top_k={top_k}")
+
+        logger.info(
+            f"收到在知识库 '{collection_name}' 中搜索的请求: query='{query}', top_k={top_k}"
+        )
 
         # 验证必要参数
         if not collection_name or not query:
@@ -368,13 +404,27 @@ class KnowledgeBaseWebAPI:
         if not await self.vec_db.collection_exists(collection_name):
             return Response().error("目标知识库不存在").__dict__
 
+        # TODO: 添加数据完整性检查
+        # 检查集合是否真的有数据
+        doc_count = await self.vec_db.count_documents(collection_name)
+        logger.info(f"知识库 '{collection_name}' 包含 {doc_count} 个文档")
+
+        if doc_count == 0:
+            logger.warning(f"知识库 '{collection_name}' 为空，无法搜索")
+            return Response().ok(data=[], message="知识库为空，请先添加文档").__dict__
+
         try:
             # 执行搜索
+            logger.debug(f"开始在知识库 '{collection_name}' 中搜索...")
             results = await self.vec_db.search(collection_name, query, top_k)
+            logger.info(f"搜索完成，找到 {len(results)} 个结果")
 
             # 格式化结果以便前端展示
             formatted_results = []
             for i, result in enumerate(results):
+                logger.debug(
+                    f"结果 {i + 1}: score={result.score:.4f}, id={result.document.id}"
+                )
                 formatted_results.append(
                     {
                         "id": result.document.id,
@@ -383,6 +433,8 @@ class KnowledgeBaseWebAPI:
                         "score": result.score,
                     }
                 )
+
+            logger.info(f"返回格式化结果: {len(formatted_results)} 个项目")
             return Response().ok(data=formatted_results).__dict__
         except Exception as e:
             logger.error(f"搜索失败: {str(e)}")
@@ -403,22 +455,28 @@ class KnowledgeBaseWebAPI:
         try:
             # 尝试删除向量数据库中的集合
             deleted = await self.vec_db.delete_collection(collection_name)
-            
+
             # 清理用户偏好中的集合元数据
             if self.user_prefs_handler:
-                collection_metadata = self.user_prefs_handler.user_collection_preferences.get("collection_metadata", {})
+                collection_metadata = (
+                    self.user_prefs_handler.user_collection_preferences.get(
+                        "collection_metadata", {}
+                    )
+                )
                 if collection_name in collection_metadata:
                     del collection_metadata[collection_name]
-                    self.user_prefs_handler.user_collection_preferences["collection_metadata"] = collection_metadata
+                    self.user_prefs_handler.user_collection_preferences[
+                        "collection_metadata"
+                    ] = collection_metadata
                     await self.user_prefs_handler.save_user_preferences()
                     logger.info(f"已清理知识库 '{collection_name}' 的元数据")
-            
+
             if deleted:
                 logger.info(f"知识库 '{collection_name}' 删除成功")
                 return Response().ok(f"删除 {collection_name} 成功").__dict__
             else:
                 return Response().error("目标知识库不存在或删除失败").__dict__
-                
+
         except Exception as e:
             logger.error(f"删除失败: {str(e)}")
             return Response().error(f"删除失败: {str(e)}").__dict__
@@ -448,47 +506,49 @@ class KnowledgeBaseWebAPI:
         collection_name = request.args.get("collection_name")
         page = int(request.args.get("page", 1))
         page_size = int(request.args.get("page_size", 20))
-        
+
         logger.info(f"收到获取文档列表请求: collection={collection_name}, page={page}")
-        
+
         if not collection_name:
             return Response().error("缺少集合名称").__dict__
-        
+
         if not await self.vec_db.collection_exists(collection_name):
             return Response().error("目标知识库不存在").__dict__
-            
+
         try:
             # 计算偏移量
             offset = (page - 1) * page_size
-            
+
             # 获取文档列表（这里需要假设向量数据库支持分页查询）
             # 由于原始接口可能不支持分页，这里提供一个基础实现
             total_count = await self.vec_db.count_documents(collection_name)
-            
+
             # 模拟获取文档列表（实际实现需要根据具体的向量数据库API）
             documents = []
-            
+
             # 基础文档信息
             for i in range(min(page_size, total_count - offset)):
                 doc_id = f"doc_{offset + i}"
-                documents.append({
-                    "id": doc_id,
-                    "source": "unknown",  # 需要从元数据中获取
-                    "chunk_index": i,
-                    "created_at": "unknown",
-                    "preview": "文档预览内容..."[:100] + "..."
-                })
-            
+                documents.append(
+                    {
+                        "id": doc_id,
+                        "source": "unknown",  # 需要从元数据中获取
+                        "chunk_index": i,
+                        "created_at": "unknown",
+                        "preview": "文档预览内容..."[:100] + "...",
+                    }
+                )
+
             result = {
                 "documents": documents,
                 "total": total_count,
                 "page": page,
                 "page_size": page_size,
-                "total_pages": (total_count + page_size - 1) // page_size
+                "total_pages": (total_count + page_size - 1) // page_size,
             }
-            
+
             return Response().ok(data=result).__dict__
-            
+
         except Exception as e:
             logger.error(f"获取文档列表失败: {str(e)}")
             return Response().error(f"获取文档列表失败: {str(e)}").__dict__
@@ -499,49 +559,104 @@ class KnowledgeBaseWebAPI:
         """
         collection_name = request.args.get("collection_name")
         logger.info(f"收到获取统计信息请求: {collection_name}")
-        
+
         if not collection_name:
             return Response().error("缺少集合名称").__dict__
-        
+
         if not await self.vec_db.collection_exists(collection_name):
             return Response().error("目标知识库不存在").__dict__
-            
+
         try:
             # 获取基础统计信息
             doc_count = await self.vec_db.count_documents(collection_name)
-            
+
             # 获取集合元数据
             collection_metadata = (
                 self.user_prefs_handler.user_collection_preferences.get(
                     "collection_metadata", {}
-                ).get(collection_name, {}) if self.user_prefs_handler else {}
+                ).get(collection_name, {})
+                if self.user_prefs_handler
+                else {}
             )
-            
+
             # 计算存储大小（估算）
             estimated_size = doc_count * 500  # 每个文档估算500字节
-            
+
             # 统计信息
             stats = {
                 "document_count": doc_count,
                 "estimated_size_bytes": estimated_size,
                 "estimated_size_human": self._format_bytes(estimated_size),
                 "created_at": collection_metadata.get("created_at"),
-                "last_modified": collection_metadata.get("last_modified", int(time.time())),
+                "last_modified": collection_metadata.get(
+                    "last_modified", int(time.time())
+                ),
                 "description": collection_metadata.get("description", ""),
                 "emoji": collection_metadata.get("emoji", "📚"),
-                "embedding_provider": collection_metadata.get("embedding_provider_id", "unknown")
+                "embedding_provider": collection_metadata.get(
+                    "embedding_provider_id", "unknown"
+                ),
             }
-            
+
             return Response().ok(data=stats).__dict__
-            
+
         except Exception as e:
             logger.error(f"获取统计信息失败: {str(e)}")
             return Response().error(f"获取统计信息失败: {str(e)}").__dict__
 
     def _format_bytes(self, bytes_size):
         """格式化字节大小为人类可读格式"""
-        for unit in ['B', 'KB', 'MB', 'GB']:
+        for unit in ["B", "KB", "MB", "GB"]:
             if bytes_size < 1024.0:
                 return f"{bytes_size:.1f}{unit}"
             bytes_size /= 1024.0
         return f"{bytes_size:.1f}TB"
+
+    async def repair_collection_data(self):
+        """修复集合数据：检查并重新生成缺失的向量"""
+        collection_name = request.args.get("collection_name")
+        logger.info(f"收到修复集合数据请求: {collection_name}")
+
+        if not collection_name:
+            return Response().error("缺少集合名称").__dict__
+
+        if not await self.vec_db.collection_exists(collection_name):
+            return Response().error("目标知识库不存在").__dict__
+
+        try:
+            # TODO: 实现数据修复逻辑
+            # 1. 检查数据库和索引的一致性
+            # 2. 重新生成缺失的向量
+            # 3. 重建索引文件
+
+            # 先获取基本信息
+            doc_count = await self.vec_db.count_documents(collection_name)
+
+            # 检查向量索引状态
+            await self.vec_db._ensure_collection_loaded(collection_name)
+            index_count = (
+                self.vec_db.index_store.index.ntotal
+                if self.vec_db.index_store.index
+                else 0
+            )
+
+            repair_info = {
+                "collection_name": collection_name,
+                "documents_in_db": doc_count,
+                "vectors_in_index": index_count,
+                "consistent": doc_count == index_count,
+                "repair_needed": doc_count != index_count,
+                "suggestion": "重新上传文档"
+                if doc_count != index_count
+                else "数据一致",
+            }
+
+            logger.info(
+                f"集合 '{collection_name}' 数据状态: 数据库文档={doc_count}, 索引向量={index_count}"
+            )
+
+            return Response().ok(data=repair_info).__dict__
+
+        except Exception as e:
+            logger.error(f"修复集合数据失败: {str(e)}")
+            return Response().error(f"修复失败: {str(e)}").__dict__
