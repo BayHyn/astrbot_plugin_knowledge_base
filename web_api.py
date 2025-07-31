@@ -43,27 +43,54 @@ class KnowledgeBaseWebAPI:
             raise RuntimeError("AstrBot 版本过低，无法支持此插件，请升级 AstrBot。")
 
         # 注册API端点
-        self._register_api_endpoints()
-
-    def _register_api_endpoints(self):
-        """注册所有API端点，增强容错性"""
-        endpoints = [
-            ("/alkaid/kb/create_collection", self.create_collection, ["POST"], "创建一个新的知识库集合"),
-            ("/alkaid/kb/collections", self.list_collections, ["GET"], "列出所有知识库集合"),
-            ("/alkaid/kb/collection/add_file", self.add_documents, ["POST"], "向指定集合添加文档"),
-            ("/alkaid/kb/collection/search", self.search_documents, ["GET"], "搜索指定集合中的文档"),
-            ("/alkaid/kb/collection/delete", self.delete_collection, ["GET"], "删除指定集合"),
-            ("/alkaid/kb/collection/documents", self.list_documents, ["GET"], "获取集合中的文档列表"),
-            ("/alkaid/kb/collection/stats", self.get_collection_stats, ["GET"], "获取集合统计信息"),
-            ("/alkaid/kb/task_status", self.get_task_status, ["GET"], "获取异步任务的状态"),
-        ]
-        
-        for path, handler, methods, description in endpoints:
-            try:
-                self.astrbot_context.register_web_api(path, handler, methods, description)
-                logger.debug(f"已注册API端点: {path}")
-            except Exception as e:
-                logger.error(f"注册API端点失败 {path}: {e}")
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/create_collection",
+            self.create_collection,
+            ["POST"],
+            "创建一个新的知识库集合",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collections",
+            self.list_collections,
+            ["GET"],
+            "列出所有知识库集合",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/add_file",
+            self.add_documents,
+            ["POST"],
+            "向指定集合添加文档",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/search",
+            self.search_documents,
+            ["GET"],
+            "搜索指定集合中的文档",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/delete",
+            self.delete_collection,
+            ["GET"],
+            "删除指定集合",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/documents",
+            self.list_documents,
+            ["GET"],
+            "获取集合中的文档列表",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/stats",
+            self.get_collection_stats,
+            ["GET"],
+            "获取集合统计信息",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/task_status",
+            self.get_task_status,
+            ["GET"],
+            "获取异步任务的状态",
+        )
 
     def _generate_safe_filename(self, original_filename: str) -> str:
         """生成安全的临时文件名，避免并发冲突"""
@@ -133,6 +160,25 @@ class KnowledgeBaseWebAPI:
         """
         logger.info("收到列出知识库集合请求")
         try:
+            # 清理损坏的集合（可选，仅在需要时执行）
+            corrupted_collections = await self.vec_db.cleanup_corrupted_collections()
+            if corrupted_collections:
+                logger.info(f"清理了 {len(corrupted_collections)} 个损坏的集合文件")
+                
+                # 同时清理这些集合的元数据
+                if self.user_prefs_handler:
+                    collection_metadata = self.user_prefs_handler.user_collection_preferences.get("collection_metadata", {})
+                    cleaned_metadata = False
+                    for corrupted_name in corrupted_collections:
+                        if corrupted_name in collection_metadata:
+                            del collection_metadata[corrupted_name]
+                            cleaned_metadata = True
+                            logger.info(f"清理了损坏集合 '{corrupted_name}' 的元数据")
+                    
+                    if cleaned_metadata:
+                        self.user_prefs_handler.user_collection_preferences["collection_metadata"] = collection_metadata
+                        await self.user_prefs_handler.save_user_preferences()
+            
             collections = await self.vec_db.list_collections()
             result = []
             collections_metadata = (
@@ -342,15 +388,28 @@ class KnowledgeBaseWebAPI:
         collection_name = request.args.get("collection_name")
         logger.info(f"收到删除知识库请求: {collection_name}")
 
-        # 检查知识库是否存在
-        if not await self.vec_db.collection_exists(collection_name):
-            return Response().error("目标知识库不存在").__dict__
+        if not collection_name:
+            return Response().error("缺少集合名称").__dict__
 
         try:
-            # 执行删除
-            await self.vec_db.delete_collection(collection_name)
-            logger.info(f"知识库 '{collection_name}' 删除成功")
-            return Response().ok(f"删除 {collection_name} 成功").__dict__
+            # 尝试删除向量数据库中的集合
+            deleted = await self.vec_db.delete_collection(collection_name)
+            
+            # 清理用户偏好中的集合元数据
+            if self.user_prefs_handler:
+                collection_metadata = self.user_prefs_handler.user_collection_preferences.get("collection_metadata", {})
+                if collection_name in collection_metadata:
+                    del collection_metadata[collection_name]
+                    self.user_prefs_handler.user_collection_preferences["collection_metadata"] = collection_metadata
+                    await self.user_prefs_handler.save_user_preferences()
+                    logger.info(f"已清理知识库 '{collection_name}' 的元数据")
+            
+            if deleted:
+                logger.info(f"知识库 '{collection_name}' 删除成功")
+                return Response().ok(f"删除 {collection_name} 成功").__dict__
+            else:
+                return Response().error("目标知识库不存在或删除失败").__dict__
+                
         except Exception as e:
             logger.error(f"删除失败: {str(e)}")
             return Response().error(f"删除失败: {str(e)}").__dict__

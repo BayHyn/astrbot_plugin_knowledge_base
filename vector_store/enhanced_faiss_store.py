@@ -496,7 +496,7 @@ class EnhancedFaissStore(VectorDBBase):
             
             if os.path.exists(index_path):
                 # 获取维度并初始化索引
-                dimension = self.embedding_util.get_dimensions(collection_name)
+                dimension = self.embedding_util.get_dimensions()
                 self.index_store.initialize(dimension)
             
             self.collection_name = collection_name
@@ -516,17 +516,17 @@ class EnhancedFaissStore(VectorDBBase):
             self.index_store = FAISSIndexStore(index_path, self.config)
 
             # 获取维度并初始化索引
-            dimension = self.embedding_util.get_dimensions(collection_name)
+            dimension = self.embedding_util.get_dimensions()
             self.index_store.initialize(dimension)
 
             self.collection_name = collection_name
             logger.info(f"成功创建集合: {collection_name}")
 
     async def collection_exists(self, collection_name: str) -> bool:
-        """检查集合是否存在"""
+        """检查集合是否存在（包括空集合）"""
         db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
-        index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
-        return os.path.exists(db_path) and os.path.exists(index_path)
+        # 只要有数据库文件就认为集合存在（空集合是正常的）
+        return os.path.exists(db_path)
 
     async def add_documents(
         self, collection_name: str, documents: List[Document]
@@ -731,21 +731,25 @@ class EnhancedFaissStore(VectorDBBase):
 
     async def delete_collection(self, collection_name: str) -> bool:
         """删除集合"""
-        if not await self.collection_exists(collection_name):
-            return False
-
         try:
-            # 删除文件
+            # 删除文件（无论集合是否完整都尝试删除相关文件）
             db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
             index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
 
+            deleted_files = []
             if os.path.exists(db_path):
                 os.remove(db_path)
+                deleted_files.append("enhanced.db")
             if os.path.exists(index_path):
                 os.remove(index_path)
+                deleted_files.append("faiss")
 
-            logger.info(f"成功删除集合: {collection_name}")
-            return True
+            if deleted_files:
+                logger.info(f"成功删除集合 {collection_name} 的文件: {', '.join(deleted_files)}")
+                return True
+            else:
+                logger.warning(f"集合 {collection_name} 没有找到相关文件")
+                return False
         except Exception as e:
             logger.error(f"删除集合失败: {e}")
             return False
@@ -762,6 +766,40 @@ class EnhancedFaissStore(VectorDBBase):
                 collections.append(collection_name)
 
         return collections
+
+    async def cleanup_corrupted_collections(self) -> List[str]:
+        """清理损坏的集合（数据库文件存在但无法正常访问的集合）"""
+        corrupted_collections = []
+        if not os.path.exists(self.data_path):
+            return corrupted_collections
+
+        for filename in os.listdir(self.data_path):
+            if filename.endswith(".enhanced.db"):
+                collection_name = filename[:-12]  # 移除.enhanced.db
+                db_path = os.path.join(self.data_path, filename)
+                
+                # 检查数据库文件是否损坏
+                try:
+                    # 尝试简单的数据库连接测试
+                    import sqlite3
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                    conn.close()
+                except Exception as e:
+                    # 如果数据库文件损坏，删除它
+                    try:
+                        os.remove(db_path)
+                        # 同时删除可能存在的faiss文件
+                        index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
+                        if os.path.exists(index_path):
+                            os.remove(index_path)
+                        corrupted_collections.append(collection_name)
+                        logger.info(f"已清理损坏的集合文件: {collection_name}")
+                    except Exception as cleanup_error:
+                        logger.error(f"清理损坏集合失败 {collection_name}: {cleanup_error}")
+
+        return corrupted_collections
 
     async def count_documents(self, collection_name: str) -> int:
         """统计文档数量"""
