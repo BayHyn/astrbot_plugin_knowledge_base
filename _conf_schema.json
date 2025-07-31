@@ -1,12 +1,4 @@
 {
-    "vector_db_type": {
-        "description": "选择向量数据库类型",
-        "type": "string",
-        "default": "faiss",
-        "options": [
-            "faiss"
-        ]
-    },
     "default_collection_name": {
         "description": "默认知识库集合名称",
         "type": "string",
@@ -44,30 +36,6 @@
         "default": false,
         "hint": "如果启用，则会消耗AstrBot当前使用的提供商Token。（仅支持OpenAI兼容的提供商）"
     },
-    "embedding_api_url": {
-        "description": "[备用] OpenAI 兼容的 Embedding API 地址 ",
-        "type": "string",
-        "default": "https://api.openai.com/v1",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。"
-    },
-    "embedding_api_key": {
-        "description": "[备用] Embedding API 密钥",
-        "type": "string",
-        "default": "sk-your-key",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。"
-    },
-    "embedding_model_name": {
-        "description": "[备用] Embedding 模型名称",
-        "type": "string",
-        "default": "text-embedding-v3",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。"
-    },
-    "embedding_dimension": {
-        "description": "[备用] Embedding 向量维度",
-        "type": "int",
-        "default": 1024,
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。"
-    },
     "rerank_config": {
         "description": "重排序配置（API服务优先，轻量化处理）",
         "type": "object",
@@ -92,6 +60,7 @@
                 "options": [
                     "cohere",
                     "jina",
+                    "openai",
                     "custom"
                 ],
                 "hint": "仅当 strategy 为 'api' 或 'auto' 时有效"
@@ -100,13 +69,19 @@
                 "description": "API重排序服务密钥",
                 "type": "string",
                 "default": "",
-                "hint": "对应提供商的API密钥，支持环境变量：COHERE_API_KEY, JINA_API_KEY"
+                "hint": "对应提供商的API密钥，支持环境变量：COHERE_API_KEY, JINA_API_KEY, OPENAI_API_KEY"
             },
             "api_url": {
                 "description": "自定义API重排序服务地址",
                 "type": "string",
                 "default": "",
-                "hint": "仅当 api_provider 为 'custom' 时有效"
+                "hint": "自定义API服务地址，为空时使用默认地址"
+            },
+            "model_name": {
+                "description": "重排序模型名称",
+                "type": "string",
+                "default": "",
+                "hint": "使用的重排序模型名称，为空时使用默认模型"
             },
             "enable_cache": {
                 "description": "启用API重排序缓存",
