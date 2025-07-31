@@ -60,61 +60,115 @@ class KnowledgeBasePlugin(Star):
         )
 
     async def _initialize_components(self):
+        """初始化组件，增强容错性"""
+        logger.info("知识库插件开始初始化...")
+        
+        # 初始化状态跟踪
+        initialization_steps = [
+            "embedding_util",
+            "vector_db", 
+            "user_prefs_handler",
+            "kb_service",
+            "document_service", 
+            "llm_enhancer_service",
+            "web_api"
+        ]
+        
+        failed_steps = []
+        
         try:
-            logger.info("知识库插件开始初始化...")
-
-            # --- 依赖注入顺序 ---
-            # 1. 初始化嵌入工具
-            from .utils.embedding import EmbeddingUtil
-
-            embedding_helper = EmbeddingUtil(self.plugin_config.embedding)
+            # 1. 初始化嵌入工具 - 直接使用AstrBot内置的提供商
+            try:
+                from .utils.embedding import EmbeddingUtil
+                embedding_helper = EmbeddingUtil(provider_context=self.context)
+                logger.info("✓ 嵌入工具初始化成功")
+            except Exception as e:
+                failed_steps.append("embedding_util")
+                logger.error(f"✗ 嵌入工具初始化失败: {e}")
+                raise
 
             # 2. 初始化向量数据库
-            from .vector_store.enhanced_faiss_store import EnhancedFaissStore
-
-            vector_db = EnhancedFaissStore(
-                embedding_util=embedding_helper,
-                data_path=self.persistent_data_root_path,
-            )
-            await vector_db.initialize()
+            try:
+                from .vector_store.enhanced_faiss_store import EnhancedFaissStore
+                vector_db = EnhancedFaissStore(
+                    embedding_util=embedding_helper,
+                    data_path=self.persistent_data_root_path,
+                )
+                await vector_db.initialize()
+                logger.info("✓ 向量数据库初始化成功")
+            except Exception as e:
+                failed_steps.append("vector_db")
+                logger.error(f"✗ 向量数据库初始化失败: {e}")
+                raise
 
             # 3. 初始化用户偏好处理器
-            self.user_prefs_handler = UserPrefsHandler(
-                prefs_path=self.user_prefs_path,
-                vector_db=vector_db,
-                config=self.plugin_config,
-            )
-            await self.user_prefs_handler.load_user_preferences()
+            try:
+                self.user_prefs_handler = UserPrefsHandler(
+                    prefs_path=self.user_prefs_path,
+                    vector_db=vector_db,
+                    config=self.plugin_config,
+                )
+                await self.user_prefs_handler.load_user_preferences()
+                logger.info("✓ 用户偏好处理器初始化成功")
+            except Exception as e:
+                failed_steps.append("user_prefs_handler")
+                logger.error(f"✗ 用户偏好处理器初始化失败: {e}")
+                # 用户偏好处理器失败不应该阻止插件启动
+                logger.warning("用户偏好处理器初始化失败，将创建默认实例")
+                self.user_prefs_handler = None
 
             # 4. 初始化知识库服务
-            self.kb_service = KnowledgeBaseService(
-                vector_db=vector_db,
-                user_prefs_handler=self.user_prefs_handler,
-                settings=self.plugin_config,
-            )
+            try:
+                self.kb_service = KnowledgeBaseService(
+                    vector_db=vector_db,
+                    user_prefs_handler=self.user_prefs_handler,
+                    settings=self.plugin_config,
+                )
+                logger.info("✓ 知识库服务初始化成功")
+            except Exception as e:
+                failed_steps.append("kb_service")
+                logger.error(f"✗ 知识库服务初始化失败: {e}")
+                raise
 
             # 5. 初始化文档服务
-            from .utils.file_parser import FileParser
-            from .utils.text_splitter import TextSplitterUtil
+            try:
+                from .utils.file_parser import FileParser
+                from .utils.text_splitter import TextSplitterUtil
 
-            file_parser = FileParser(self.context, self.plugin_config.llm_parser)
-            text_splitter = TextSplitterUtil(chunk_size=1000, chunk_overlap=200)
-            self.document_service = DocumentService(
-                vector_db=vector_db,
-                kb_service=self.kb_service,
-                file_parser=file_parser,
-                text_splitter=text_splitter,
-                data_path=self.persistent_data_root_path,
-            )
+                file_parser = FileParser(self.context, self.plugin_config.llm_parser)
+                text_splitter = TextSplitterUtil(
+                    chunk_size=self.plugin_config.text_chunk_size,
+                    chunk_overlap=self.plugin_config.text_chunk_overlap
+                )
+                self.document_service = DocumentService(
+                    vector_db=vector_db,
+                    kb_service=self.kb_service,
+                    file_parser=file_parser,
+                    text_splitter=text_splitter,
+                    data_path=self.persistent_data_root_path,
+                )
+                logger.info("✓ 文档服务初始化成功")
+            except Exception as e:
+                failed_steps.append("document_service")
+                logger.error(f"✗ 文档服务初始化失败: {e}")
+                raise
 
             # 6. 初始化LLM增强服务
-            self.llm_enhancer_service = LLMEnhancerService(
-                vector_db=vector_db,
-                user_prefs_handler=self.user_prefs_handler,
-                settings=self.plugin_config,
-            )
+            try:
+                self.llm_enhancer_service = LLMEnhancerService(
+                    vector_db=vector_db,
+                    user_prefs_handler=self.user_prefs_handler,
+                    settings=self.plugin_config,
+                )
+                logger.info("✓ LLM增强服务初始化成功")
+            except Exception as e:
+                failed_steps.append("llm_enhancer_service")
+                logger.error(f"✗ LLM增强服务初始化失败: {e}")
+                # LLM增强服务失败不应该阻止插件启动
+                logger.warning("LLM增强服务初始化失败，RAG功能将不可用")
+                self.llm_enhancer_service = None
 
-            # 7. Initialize Web API
+            # 7. 初始化Web API
             try:
                 self.web_api = KnowledgeBaseWebAPI(
                     kb_service=self.kb_service,
@@ -122,24 +176,70 @@ class KnowledgeBasePlugin(Star):
                     astrbot_context=self.context,
                     plugin_config=self.plugin_config,
                 )
+                logger.info("✓ WebAPI初始化成功")
             except Exception as e:
-                logger.warning(
-                    f"知识库 WebAPI 初始化失败，可能导致无法在 WebUI 操作知识库。原因：{e}",
-                    exc_info=True,
-                )
+                failed_steps.append("web_api")
+                logger.warning(f"✗ WebAPI初始化失败: {e}")
+                logger.warning("WebAPI初始化失败，WebUI知识库管理功能将不可用")
+                self.web_api = None
 
-            logger.info("知识库插件初始化成功。")
+            # 输出初始化结果总结
+            success_count = len(initialization_steps) - len(failed_steps)
+            logger.info(f"知识库插件初始化完成: {success_count}/{len(initialization_steps)} 个组件成功初始化")
+            
+            if failed_steps:
+                logger.warning(f"以下组件初始化失败: {', '.join(failed_steps)}")
+                # 如果核心组件失败，不启动插件
+                critical_components = ["embedding_util", "vector_db", "kb_service", "document_service"]
+                failed_critical = [step for step in failed_steps if step in critical_components]
+                if failed_critical:
+                    logger.error(f"关键组件初始化失败: {', '.join(failed_critical)}")
+                    raise Exception(f"关键组件初始化失败: {', '.join(failed_critical)}")
 
         except Exception as e:
             logger.error(f"知识库插件初始化失败: {e}", exc_info=True)
+            # 清理已初始化的组件
+            await self._cleanup_on_failure()
             self.kb_service = None
+            raise
+
+    async def _cleanup_on_failure(self):
+        """初始化失败时的清理工作"""
+        try:
+            if hasattr(self, 'kb_service') and self.kb_service:
+                await self.kb_service.close()
+                logger.info("已清理知识库服务")
+        except Exception as e:
+            logger.warning(f"清理知识库服务时出错: {e}")
+        
+        try:
+            if hasattr(self, 'user_prefs_handler') and self.user_prefs_handler:
+                await self.user_prefs_handler.save_user_preferences()
+                logger.info("已保存用户偏好设置")
+        except Exception as e:
+            logger.warning(f"保存用户偏好设置时出错: {e}")
 
     async def _ensure_initialized(self) -> bool:
-        if self.init_task and not self.init_task.done():
-            await self.init_task
-        if not self.kb_service:
-            logger.error("知识库插件未正确初始化，请检查日志和配置。")
+        """确保插件已正确初始化，增强容错性"""
+        try:
+            if self.init_task and not self.init_task.done():
+                await asyncio.wait_for(self.init_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error("插件初始化超时")
             return False
+        except Exception as e:
+            logger.error(f"等待插件初始化时出错: {e}")
+            return False
+            
+        # 检查核心组件是否可用
+        if not self.kb_service:
+            logger.error("知识库服务未正确初始化")
+            return False
+            
+        if not self.document_service:
+            logger.error("文档服务未正确初始化")
+            return False
+            
         return True
 
     # --- LLM Request Hook ---
