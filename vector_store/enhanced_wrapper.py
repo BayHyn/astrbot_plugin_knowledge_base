@@ -28,11 +28,14 @@ class EnhancedVectorStore(VectorDBBase):
         embedding_util: EmbeddingUtil,
         data_path: str,
         rerank_config: Optional[Dict[str, Any]] = None,
+        user_prefs_handler=None,
     ):
         super().__init__(embedding_util, data_path)
 
         # 初始化组件
-        self.enhanced_store = EnhancedFaissStore(embedding_util, data_path)
+        self.enhanced_store = EnhancedFaissStore(
+            embedding_util, data_path, user_prefs_handler=user_prefs_handler
+        )
         self.migration_tool = MigrationTool(data_path)
         self.reranker = EnhancedHybridReranker(rerank_config)
 

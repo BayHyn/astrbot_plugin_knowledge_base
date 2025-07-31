@@ -103,12 +103,18 @@ class KnowledgeBasePlugin(Star):
                 logger.warning("用户偏好处理器初始化失败，将创建默认实例")
                 self.user_prefs_handler = None
 
-            # 3. 初始化向量数据库
+            # 3. 初始化向量数据库（使用增强包装器）
             try:
-                from .vector_store.enhanced_faiss_store import EnhancedFaissStore
-                vector_db = EnhancedFaissStore(
+                from .vector_store.enhanced_wrapper import EnhancedVectorStore
+                from .vector_store.config_adapter import create_rerank_config_from_astrbot
+                
+                # 从 AstrBot 配置创建重排序配置
+                rerank_config = create_rerank_config_from_astrbot(self.config)
+                
+                vector_db = EnhancedVectorStore(
                     embedding_util=embedding_helper,
                     data_path=self.persistent_data_root_path,
+                    rerank_config=rerank_config,
                     user_prefs_handler=self.user_prefs_handler,
                 )
                 await vector_db.initialize()
