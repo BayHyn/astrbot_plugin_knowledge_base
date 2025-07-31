@@ -38,13 +38,18 @@ from astrbot.api import logger
 class StorageConfig:
     """存储配置参数"""
 
-    use_compression: bool = True  # 是否启用向量压缩
+    use_compression: bool = False  # 暂时禁用压缩，避免训练数据不足问题
     compression_bits: int = 8  # PQ压缩位数
-    use_ivf: bool = True  # 是否使用IVF索引
-    nlist: int = 100  # IVF聚类中心数
+    use_ivf: bool = False  # 暂时禁用IVF，避免训练数据不足问题
+    nlist: int = 10  # IVF聚类中心数（减少到10，降低训练数据需求）
     use_mmap: bool = True  # 是否使用内存映射
     cache_size: int = 1000  # 缓存大小
     batch_size: int = 100  # 批处理大小
+
+    # TODO: 未来优化配置策略
+    # - 根据预期数据规模动态调整配置
+    # - 实现配置自动优化算法
+    # - 支持运行时配置切换
 
 
 # 增强的文档结构
@@ -250,7 +255,10 @@ class SQLiteMetadataStore:
     ) -> List[EnhancedDocument]:
         """根据向量ID列表获取文档，可选地应用过滤器"""
         if not vector_ids:
+            logger.debug("vector_ids为空，返回空列表")
             return []
+
+        logger.debug(f"查询向量ID: {vector_ids[:10]}... (共{len(vector_ids)}个)")
 
         placeholders = ",".join("?" * len(vector_ids))
         base_query = f"SELECT * FROM documents WHERE vector_id IN ({placeholders})"
@@ -262,9 +270,55 @@ class SQLiteMetadataStore:
                 base_query += f" AND {filter_clause}"
                 params.extend(filter_params)
 
+        logger.debug(f"执行SQL查询: {base_query}")
+        logger.debug(f"参数: {params[:10]}... (共{len(params)}个)")
+
         with self._get_connection() as conn:
             cursor = conn.execute(base_query, params)
             rows = cursor.fetchall()
+
+            logger.debug(f"SQL查询返回 {len(rows)} 行数据")
+
+            # TODO: 添加数据库一致性检查
+            # 如果没有匹配的文档，检查数据库中实际存储的vector_id范围
+            if len(rows) == 0 and len(vector_ids) > 0:
+                logger.warning("没有找到匹配的文档，检查数据库中的vector_id范围...")
+                try:
+                    cursor = conn.execute(
+                        "SELECT MIN(vector_id), MAX(vector_id), COUNT(*) FROM documents"
+                    )
+                    result = cursor.fetchone()
+                    if result and result[0] is not None:
+                        min_id, max_id, count = result
+                        logger.warning(
+                            f"数据库中vector_id范围: {min_id}-{max_id}, 总数: {count}"
+                        )
+                        logger.warning(
+                            f"查询的vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
+                        )
+
+                        # 检查是否有任何匹配
+                        sample_ids = vector_ids[:5]  # 检查前5个ID
+                        for vid in sample_ids:
+                            cursor = conn.execute(
+                                "SELECT COUNT(*) FROM documents WHERE vector_id = ?",
+                                (vid,),
+                            )
+                            exists = cursor.fetchone()[0]
+                            logger.debug(f"vector_id {vid} 存在: {exists > 0}")
+
+                        # 如果数据库中的vector_id都是负数或者从0开始，而查询的是从其他数字开始
+                        # 这可能表明数据不一致，需要修复
+                        if max_id < min(vector_ids):
+                            logger.error(
+                                f"数据不一致：数据库vector_id最大值({max_id}) < 查询最小值({min(vector_ids)})"
+                            )
+                            logger.error("可能需要重建索引或修复数据")
+                    else:
+                        logger.warning("数据库中没有任何文档记录")
+
+                except Exception as e:
+                    logger.error(f"检查数据库状态时出错: {e}")
 
             documents = []
             for row in rows:
@@ -363,36 +417,100 @@ class FAISSIndexStore:
 
     def initialize(self, dimension: int):
         """初始化FAISS索引"""
+        # TODO: 添加维度验证和索引兼容性检查
+        if dimension is None or dimension <= 0:
+            raise ValueError(f"无效的维度值: {dimension}")
+
         self.dimension = dimension
+        logger.debug(f"初始化FAISS索引，维度: {dimension}")
 
         if os.path.exists(self.index_path):
-            self.load_index()
+            try:
+                self.load_index()
+                # 验证加载的索引维度是否匹配
+                if self.index is not None and hasattr(self.index, "d"):
+                    if self.index.d != dimension:
+                        logger.warning(
+                            f"索引维度不匹配：文件={self.index.d}, 期望={dimension}，重新创建索引"
+                        )
+                        self.create_index()
+                    else:
+                        logger.debug(f"索引加载成功，维度匹配: {dimension}")
+                else:
+                    logger.warning("加载的索引无效，重新创建")
+                    self.create_index()
+            except Exception as e:
+                logger.error(f"加载索引失败，重新创建: {e}")
+                self.create_index()
         else:
             self.create_index()
 
+        # 最终验证索引是否正确初始化
+        if self.index is None:
+            raise ValueError("FAISS索引初始化失败")
+
     def create_index(self):
         """创建新的FAISS索引"""
-        if self.config.use_compression:
-            # 使用Product Quantization压缩
-            quantizer = faiss.IndexFlatL2(self.dimension)
-            self.index = faiss.IndexIVFPQ(
-                quantizer,
-                self.dimension,
-                self.config.nlist,
-                self.config.compression_bits,
-                8,
-            )
-        elif self.config.use_ivf:
-            # 使用IVF索引
-            quantizer = faiss.IndexFlatL2(self.dimension)
-            self.index = faiss.IndexIVFFlat(
-                quantizer, self.dimension, self.config.nlist
-            )
-        else:
-            # 使用基础L2索引
-            self.index = faiss.IndexFlatL2(self.dimension)
+        # TODO: 根据数据量和性能需求动态选择索引类型
+        logger.debug(f"创建新的FAISS索引，维度: {self.dimension}")
 
-        self.is_trained = not (self.config.use_compression or self.config.use_ivf)
+        try:
+            # TODO: 实现智能索引类型选择策略
+            # 对于小数据集，使用简单的FlatL2索引避免训练点不足的问题
+            # IVF索引需要大量训练数据，通常需要聚类数的至少39倍的训练点
+
+            # 暂时禁用复杂索引类型，使用最稳定的FlatL2索引
+            # 这样可以避免训练点不足的问题
+            use_simple_index = True  # TODO: 未来根据数据量动态决定
+
+            if use_simple_index:
+                # 使用基础L2索引，不需要训练
+                logger.info("使用基础FlatL2索引（适合小到中等规模数据集）")
+                self.index = faiss.IndexFlatL2(self.dimension)
+                self.is_trained = True
+            elif self.config.use_compression:
+                # 使用Product Quantization压缩
+                # 需要足够的训练数据：至少 nlist * 39 个向量
+                logger.info("使用IVF+PQ压缩索引")
+                quantizer = faiss.IndexFlatL2(self.dimension)
+                self.index = faiss.IndexIVFPQ(
+                    quantizer,
+                    self.dimension,
+                    self.config.nlist,
+                    self.config.compression_bits,
+                    8,
+                )
+                self.is_trained = False
+            elif self.config.use_ivf:
+                # 使用IVF索引
+                # 需要足够的训练数据：至少 nlist * 39 个向量
+                logger.info("使用IVF索引")
+                quantizer = faiss.IndexFlatL2(self.dimension)
+                self.index = faiss.IndexIVFFlat(
+                    quantizer, self.dimension, self.config.nlist
+                )
+                self.is_trained = False
+            else:
+                # 使用基础L2索引
+                logger.info("使用基础FlatL2索引")
+                self.index = faiss.IndexFlatL2(self.dimension)
+                self.is_trained = True
+
+            logger.debug(
+                f"索引创建成功，类型: {type(self.index).__name__}, 是否已训练: {self.is_trained}"
+            )
+
+        except Exception as e:
+            logger.error(f"创建FAISS索引失败: {e}")
+            # 如果创建失败，回退到最简单的索引类型
+            try:
+                logger.info("尝试创建基础L2索引作为备用")
+                self.index = faiss.IndexFlatL2(self.dimension)
+                self.is_trained = True
+                logger.info("备用索引创建成功")
+            except Exception as fallback_e:
+                logger.error(f"备用索引创建也失败: {fallback_e}")
+                raise ValueError(f"无法创建任何类型的FAISS索引: {fallback_e}")
 
     def load_index(self):
         """加载FAISS索引"""
@@ -418,13 +536,53 @@ class FAISSIndexStore:
         if self.index is None:
             raise ValueError("索引未初始化")
 
+        # TODO: 实现更智能的训练策略和错误恢复机制
         if not self.is_trained and (self.config.use_compression or self.config.use_ivf):
-            # 训练索引
-            self.index.train(vectors)
-            self.is_trained = True
+            # 检查是否有足够的训练数据
+            n_vectors = vectors.shape[0]
+            min_required = self.config.nlist * 39  # FAISS建议的最小训练数据量
+
+            if n_vectors < min_required:
+                logger.warning(
+                    f"训练数据不足：当前 {n_vectors} 个向量，需要至少 {min_required} 个"
+                )
+                logger.info("降级到基础FlatL2索引以避免训练错误")
+
+                # 重新创建为简单索引
+                try:
+                    self.index = faiss.IndexFlatL2(self.dimension)
+                    self.is_trained = True
+                    logger.info("成功降级到FlatL2索引")
+                except Exception as e:
+                    logger.error(f"降级索引失败: {e}")
+                    raise ValueError(f"无法创建替代索引: {e}")
+            else:
+                # 有足够的训练数据，进行训练
+                try:
+                    logger.info(f"开始训练索引，训练数据: {n_vectors} 个向量")
+                    self.index.train(vectors)
+                    self.is_trained = True
+                    logger.info("索引训练完成")
+                except Exception as e:
+                    logger.error(f"索引训练失败: {e}")
+                    # 训练失败，降级到简单索引
+                    logger.info("训练失败，降级到基础FlatL2索引")
+                    try:
+                        self.index = faiss.IndexFlatL2(self.dimension)
+                        self.is_trained = True
+                        logger.info("成功降级到FlatL2索引")
+                    except Exception as fallback_e:
+                        logger.error(f"降级索引失败: {fallback_e}")
+                        raise ValueError(f"索引训练和降级都失败: {fallback_e}")
 
         start_id = self.index.ntotal
-        self.index.add(vectors)
+        try:
+            self.index.add(vectors)
+            logger.debug(f"成功添加 {vectors.shape[0]} 个向量，起始ID: {start_id}")
+        except Exception as e:
+            logger.error(f"添加向量失败: {e}")
+            raise ValueError(f"无法添加向量到索引: {e}")
+
         return start_id
 
     def search_vectors(
@@ -458,7 +616,7 @@ class EnhancedFaissStore(VectorDBBase):
         embedding_util: EmbeddingUtil,
         data_path: str,
         config: Optional[StorageConfig] = None,
-        user_prefs_handler = None,
+        user_prefs_handler=None,
     ):
         super().__init__(embedding_util, data_path)
         self.config = config or StorageConfig()
@@ -482,25 +640,46 @@ class EnhancedFaissStore(VectorDBBase):
 
     async def _ensure_collection_loaded(self, collection_name: str):
         """确保指定的集合已被加载"""
-        if self.collection_name != collection_name or not self.metadata_store or not self.index_store:
+        if (
+            self.collection_name != collection_name
+            or not self.metadata_store
+            or not self.index_store
+        ):
             # 需要切换或首次加载集合
             if self.metadata_store:
                 self.metadata_store.close()
             if self.index_store:
                 self.index_store.close()
-            
+
             # 加载新集合
             db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
             index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
-            
+
             self.metadata_store = SQLiteMetadataStore(db_path)
             self.index_store = FAISSIndexStore(index_path, self.config)
-            
-            if os.path.exists(index_path):
-                # 获取维度并初始化索引
-                dimension = self.embedding_util.get_dimensions(collection_name, self.user_prefs_handler)
+
+            # 总是需要初始化索引，无论文件是否存在
+            # TODO: 优化索引初始化逻辑，支持动态维度检测
+            try:
+                dimension = self.embedding_util.get_dimensions(
+                    collection_name, self.user_prefs_handler
+                )
+                if dimension is None or dimension <= 0:
+                    logger.warning(f"无法获取有效的embedding维度，使用默认值1536")
+                    dimension = 1536  # 默认维度
+
                 self.index_store.initialize(dimension)
-            
+                logger.debug(f"索引初始化成功，维度: {dimension}")
+            except Exception as e:
+                logger.error(f"索引初始化失败: {e}")
+                # 使用默认维度重试
+                try:
+                    self.index_store.initialize(1536)
+                    logger.info("使用默认维度1536重新初始化索引成功")
+                except Exception as retry_e:
+                    logger.error(f"使用默认维度重新初始化索引也失败: {retry_e}")
+                    raise ValueError(f"索引初始化失败: {retry_e}")
+
             self.collection_name = collection_name
 
     async def create_collection(self, collection_name: str):
@@ -518,7 +697,9 @@ class EnhancedFaissStore(VectorDBBase):
             self.index_store = FAISSIndexStore(index_path, self.config)
 
             # 获取维度并初始化索引
-            dimension = self.embedding_util.get_dimensions(collection_name, self.user_prefs_handler)
+            dimension = self.embedding_util.get_dimensions(
+                collection_name, self.user_prefs_handler
+            )
             self.index_store.initialize(dimension)
 
             self.collection_name = collection_name
@@ -561,37 +742,74 @@ class EnhancedFaissStore(VectorDBBase):
 
             # 生成向量
             texts = [doc.text_content for doc in enhanced_docs]
-            embeddings = await self.embedding_util.get_embeddings_async(texts, collection_name, self.user_prefs_handler)
+            logger.info(f"开始为 {len(texts)} 个文档生成embedding向量...")
+            logger.debug(
+                f"文档文本长度: {[len(text) for text in texts[:5]]}..."
+            )  # 显示前5个文档的文本长度
+
+            embeddings = await self.embedding_util.get_embeddings_async(
+                texts, collection_name, self.user_prefs_handler
+            )
+            logger.info(
+                f"Embedding生成完成，结果: {len([e for e in embeddings if e is not None])}/{len(embeddings)} 个有效"
+            )
 
             # 过滤有效向量
             valid_docs = []
             valid_embeddings = []
-            for doc, embedding in zip(enhanced_docs, embeddings):
+            for i, (doc, embedding) in enumerate(zip(enhanced_docs, embeddings)):
                 if embedding is not None:
                     doc.embedding = embedding
                     valid_docs.append(doc)
                     valid_embeddings.append(embedding)
+                    logger.debug(f"文档 {i}: 有效embedding，维度: {len(embedding)}")
+                else:
+                    logger.warning(f"文档 {i}: embedding为空，跳过")
+
+            logger.info(f"过滤后有效文档: {len(valid_docs)}/{len(enhanced_docs)}")
 
             if not valid_docs:
-                logger.warning("没有有效的向量可以添加")
+                logger.error("没有有效的向量可以添加 - 所有embedding都失败了")
                 return []
 
             # 添加到FAISS索引
             vectors = np.array(valid_embeddings).astype("float32")
             faiss.normalize_L2(vectors)
 
-            start_id = self.index_store.add_vectors(vectors)
+            # TODO: 添加索引健康检查和自动修复机制
+            # 确保索引已正确初始化
+            if self.index_store.index is None:
+                logger.error("FAISS索引为None，尝试重新初始化")
+                try:
+                    # 重新初始化索引
+                    dimension = vectors.shape[1] if len(vectors) > 0 else 1536
+                    self.index_store.initialize(dimension)
+                    logger.info(f"重新初始化索引成功，维度: {dimension}")
+                except Exception as e:
+                    logger.error(f"重新初始化索引失败: {e}")
+                    raise ValueError(f"索引初始化失败，无法添加向量: {e}")
 
-            # 添加到SQLite
+            start_id = self.index_store.add_vectors(vectors)
+            logger.info(f"向量添加成功，起始ID: {start_id}, 添加数量: {len(vectors)}")
+
+            # 添加到SQLite - 修复ID映射问题
             doc_ids = []
             for i, doc in enumerate(valid_docs):
-                doc.id = f"{collection_name}_{start_id + i}"
-                doc.vector_id = start_id + i  # 设置向量ID
-                self.metadata_store.add_document(doc, start_id + i)
+                vector_id = start_id + i
+                doc.id = f"{collection_name}_{vector_id}"
+                doc.vector_id = vector_id
+                self.metadata_store.add_document(doc, vector_id)
                 doc_ids.append(doc.id)
+
+            logger.debug(
+                f"已分配 {len(doc_ids)} 个文档ID (范围: {start_id}-{start_id + len(doc_ids) - 1})"
+            )
 
             # 保存索引
             self.index_store.save_index()
+
+            # 数据一致性验证
+            await self._validate_data_consistency(collection_name, len(valid_docs))
 
             logger.info(f"成功添加 {len(doc_ids)} 个文档到集合 '{collection_name}'")
             return doc_ids
@@ -605,46 +823,108 @@ class EnhancedFaissStore(VectorDBBase):
     ) -> List[SearchResult]:
         """搜索相似文档"""
         async with self._lock:
+            logger.debug(
+                f"开始搜索，集合: {collection_name}, 查询: '{query_text}', top_k: {top_k}"
+            )
+
             if not await self.collection_exists(collection_name):
                 logger.warning(f"集合 '{collection_name}' 不存在")
                 return []
 
             # 确保集合已加载
             await self._ensure_collection_loaded(collection_name)
+            logger.debug(f"集合 '{collection_name}' 已加载")
+
+            # 检查集合是否有数据
+            doc_count = await self.count_documents(collection_name)
+            logger.info(f"集合 '{collection_name}' 包含 {doc_count} 个文档")
+
+            if doc_count == 0:
+                logger.info(f"集合 '{collection_name}' 为空，无法搜索")
+                return []
 
             # 获取查询向量
-            query_embedding = await self.embedding_util.get_embedding_async(query_text, collection_name, self.user_prefs_handler)
+            logger.debug("开始生成查询向量...")
+            query_embedding = await self.embedding_util.get_embedding_async(
+                query_text, collection_name, self.user_prefs_handler
+            )
             if query_embedding is None:
                 logger.error("无法生成查询向量")
                 return []
+
+            logger.debug(f"查询向量生成成功，维度: {len(query_embedding)}")
 
             # 向量搜索
             query_vector = np.array([query_embedding]).astype("float32")
             faiss.normalize_L2(query_vector)
 
-            distances, indices = self.index_store.search_vectors(query_vector, top_k * 2)
+            # TODO: 添加搜索前的索引状态检查
+            # 确保索引可用于搜索
+            if self.index_store.index is None:
+                logger.error("FAISS索引为None，无法执行搜索")
+                return []
 
-            # 获取文档
-            vector_ids = [idx for idx in indices[0] if idx != -1]  # 过滤有效索引
+            index_total = self.index_store.index.ntotal
+            logger.info(f"索引包含 {index_total} 个向量")
+
+            if index_total == 0:
+                logger.info(f"集合 '{collection_name}' 的索引为空，没有可搜索的向量")
+                return []
+
+            logger.debug("开始执行向量搜索...")
+            distances, indices = self.index_store.search_vectors(
+                query_vector, top_k * 2
+            )
+            logger.debug(
+                f"向量搜索完成，distances: {distances[0][: min(5, len(distances[0]))]}"
+            )
+            logger.debug(
+                f"向量搜索完成，indices: {indices[0][: min(10, len(indices[0]))]}..."
+            )
+
+            # 获取文档 - 修复数据类型问题
+            vector_ids = [
+                int(idx) for idx in indices[0] if idx != -1
+            ]  # 转换为Python int
+            logger.debug(f"有效向量ID: {vector_ids[:10]}...")  # 只显示前10个
+            logger.info(f"找到 {len(vector_ids)} 个有效向量ID")
+
             if not vector_ids:
+                logger.warning("没有找到有效的向量ID")
                 return []
 
             # 使用类的实例变量而不是创建新实例
+            logger.debug("开始获取文档元数据...")
             docs = self.metadata_store.get_documents_by_vector_ids(vector_ids, filters)
+            logger.info(f"获取到 {len(docs)} 个文档")
 
             # 构建搜索结果
             results = []
             doc_dict = {doc.vector_id: doc for doc in docs}  # 通过vector_id快速查找文档
+            logger.debug(
+                f"文档字典包含向量ID: {list(doc_dict.keys())[:10]}..."
+            )  # 只显示前10个
 
             for distance, idx in zip(distances[0], indices[0]):
                 if idx != -1 and idx in doc_dict:  # 有效索引且文档存在（通过过滤器）
                     doc = doc_dict[idx]
                     similarity = 1.0 - (distance / 2.0)  # 转换为相似度
                     results.append(SearchResult(document=doc, score=float(similarity)))
+                    logger.debug(
+                        f"添加结果: vector_id={idx}, similarity={similarity:.4f}"
+                    )
 
             # 按相似度排序
             results.sort(key=lambda x: x.score, reverse=True)
-            return results[:top_k]
+            final_results = results[:top_k]
+
+            logger.info(f"搜索完成，返回 {len(final_results)} 个结果")
+            for i, result in enumerate(final_results):
+                logger.debug(
+                    f"最终结果 {i + 1}: score={result.score:.4f}, doc_id={result.document.id}"
+                )
+
+            return final_results
 
     async def delete_documents(self, collection_name: str, doc_ids: List[str]) -> bool:
         """从指定集合中删除文档"""
@@ -704,7 +984,9 @@ class EnhancedFaissStore(VectorDBBase):
 
         # 如果内容被更新，重新生成embedding
         if content is not None:
-            new_embedding = await self.embedding_util.get_embedding_async(content, collection_name, self.user_prefs_handler)
+            new_embedding = await self.embedding_util.get_embedding_async(
+                content, collection_name, self.user_prefs_handler
+            )
             if new_embedding is not None:
                 existing_doc.embedding = new_embedding
             else:
@@ -741,7 +1023,9 @@ class EnhancedFaissStore(VectorDBBase):
                 deleted_files.append("faiss")
 
             if deleted_files:
-                logger.info(f"成功删除集合 {collection_name} 的文件: {', '.join(deleted_files)}")
+                logger.info(
+                    f"成功删除集合 {collection_name} 的文件: {', '.join(deleted_files)}"
+                )
                 return True
             else:
                 logger.warning(f"集合 {collection_name} 没有找到相关文件")
@@ -773,11 +1057,12 @@ class EnhancedFaissStore(VectorDBBase):
             if filename.endswith(".enhanced.db"):
                 collection_name = filename[:-12]  # 移除.enhanced.db
                 db_path = os.path.join(self.data_path, filename)
-                
+
                 # 检查数据库文件是否损坏
                 try:
                     # 尝试简单的数据库连接测试
                     import sqlite3
+
                     conn = sqlite3.connect(db_path)
                     cursor = conn.cursor()
                     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -787,13 +1072,17 @@ class EnhancedFaissStore(VectorDBBase):
                     try:
                         os.remove(db_path)
                         # 同时删除可能存在的faiss文件
-                        index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
+                        index_path = os.path.join(
+                            self.data_path, f"{collection_name}.faiss"
+                        )
                         if os.path.exists(index_path):
                             os.remove(index_path)
                         corrupted_collections.append(collection_name)
                         logger.info(f"已清理损坏的集合文件: {collection_name}")
                     except Exception as cleanup_error:
-                        logger.error(f"清理损坏集合失败 {collection_name}: {cleanup_error}")
+                        logger.error(
+                            f"清理损坏集合失败 {collection_name}: {cleanup_error}"
+                        )
 
         return corrupted_collections
 
@@ -844,3 +1133,55 @@ class EnhancedFaissStore(VectorDBBase):
         import hashlib
 
         return hashlib.md5(text.encode()).hexdigest()
+
+    async def _validate_data_consistency(
+        self, collection_name: str, expected_docs: int
+    ):
+        """验证数据一致性：确保FAISS索引和数据库同步"""
+        try:
+            # 获取索引中的向量数量
+            index_count = self.index_store.count_vectors()
+
+            # 获取数据库中的文档数量
+            db_count = await self.count_documents(collection_name)
+
+            logger.info(f"数据一致性检查:")
+            logger.info(f"  FAISS索引向量数: {index_count}")
+            logger.info(f"  数据库文档数: {db_count}")
+            logger.info(f"  预期文档数: {expected_docs}")
+
+            if index_count != db_count:
+                logger.error(f"数据不一致！索引和数据库数量不匹配")
+                logger.error(f"  索引: {index_count}, 数据库: {db_count}")
+
+                # 检查具体的vector_id范围
+                with self.get_metadata_store_for_collection(collection_name) as store:
+                    all_docs = store.get_all_documents()
+                    if all_docs:
+                        vector_ids = [vid for _, vid in all_docs]
+                        logger.info(
+                            f"  数据库vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
+                        )
+                        logger.info(f"  数据库vector_id总数: {len(set(vector_ids))}")
+
+                        # 检查是否有缺失的ID
+                        expected_range = set(range(index_count))
+                        actual_range = set(vector_ids)
+                        missing_ids = expected_range - actual_range
+                        extra_ids = actual_range - expected_range
+
+                        if missing_ids:
+                            logger.error(
+                                f"  缺失的vector_id: {sorted(list(missing_ids))[:10]}..."
+                            )
+                        if extra_ids:
+                            logger.error(
+                                f"  多余的vector_id: {sorted(list(extra_ids))[:10]}..."
+                            )
+                    else:
+                        logger.error("  数据库中没有文档记录")
+            else:
+                logger.info("✅ 数据一致性检查通过")
+
+        except Exception as e:
+            logger.error(f"数据一致性验证失败: {e}")
