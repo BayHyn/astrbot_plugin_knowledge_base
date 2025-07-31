@@ -458,9 +458,11 @@ class EnhancedFaissStore(VectorDBBase):
         embedding_util: EmbeddingUtil,
         data_path: str,
         config: Optional[StorageConfig] = None,
+        user_prefs_handler = None,
     ):
         super().__init__(embedding_util, data_path)
         self.config = config or StorageConfig()
+        self.user_prefs_handler = user_prefs_handler
 
         # 创建数据目录
         os.makedirs(data_path, exist_ok=True)
@@ -496,7 +498,7 @@ class EnhancedFaissStore(VectorDBBase):
             
             if os.path.exists(index_path):
                 # 获取维度并初始化索引
-                dimension = self.embedding_util.get_dimensions()
+                dimension = self.embedding_util.get_dimensions(collection_name, self.user_prefs_handler)
                 self.index_store.initialize(dimension)
             
             self.collection_name = collection_name
@@ -516,7 +518,7 @@ class EnhancedFaissStore(VectorDBBase):
             self.index_store = FAISSIndexStore(index_path, self.config)
 
             # 获取维度并初始化索引
-            dimension = self.embedding_util.get_dimensions()
+            dimension = self.embedding_util.get_dimensions(collection_name, self.user_prefs_handler)
             self.index_store.initialize(dimension)
 
             self.collection_name = collection_name
@@ -559,9 +561,7 @@ class EnhancedFaissStore(VectorDBBase):
 
             # 生成向量
             texts = [doc.text_content for doc in enhanced_docs]
-            embeddings = await self.embedding_util.get_embeddings_async(
-                texts, collection_name
-            )
+            embeddings = await self.embedding_util.get_embeddings_async(texts, collection_name, self.user_prefs_handler)
 
             # 过滤有效向量
             valid_docs = []
@@ -613,9 +613,7 @@ class EnhancedFaissStore(VectorDBBase):
             await self._ensure_collection_loaded(collection_name)
 
             # 获取查询向量
-            query_embedding = await self.embedding_util.get_embedding_async(
-                query_text, collection_name
-            )
+            query_embedding = await self.embedding_util.get_embedding_async(query_text, collection_name, self.user_prefs_handler)
             if query_embedding is None:
                 logger.error("无法生成查询向量")
                 return []
@@ -706,9 +704,7 @@ class EnhancedFaissStore(VectorDBBase):
 
         # 如果内容被更新，重新生成embedding
         if content is not None:
-            new_embedding = await self.embedding_util.get_embedding_async(
-                content, collection_name
-            )
+            new_embedding = await self.embedding_util.get_embedding_async(content, collection_name, self.user_prefs_handler)
             if new_embedding is not None:
                 existing_doc.embedding = new_embedding
             else:

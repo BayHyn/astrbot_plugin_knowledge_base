@@ -66,8 +66,8 @@ class KnowledgeBasePlugin(Star):
         # 初始化状态跟踪
         initialization_steps = [
             "embedding_util",
-            "vector_db", 
             "user_prefs_handler",
+            "vector_db", 
             "kb_service",
             "document_service", 
             "llm_enhancer_service",
@@ -87,25 +87,11 @@ class KnowledgeBasePlugin(Star):
                 logger.error(f"✗ 嵌入工具初始化失败: {e}")
                 raise
 
-            # 2. 初始化向量数据库
-            try:
-                from .vector_store.enhanced_faiss_store import EnhancedFaissStore
-                vector_db = EnhancedFaissStore(
-                    embedding_util=embedding_helper,
-                    data_path=self.persistent_data_root_path,
-                )
-                await vector_db.initialize()
-                logger.info("✓ 向量数据库初始化成功")
-            except Exception as e:
-                failed_steps.append("vector_db")
-                logger.error(f"✗ 向量数据库初始化失败: {e}")
-                raise
-
-            # 3. 初始化用户偏好处理器
+            # 2. 初始化用户偏好处理器（需要在向量数据库之前初始化）
             try:
                 self.user_prefs_handler = UserPrefsHandler(
                     prefs_path=self.user_prefs_path,
-                    vector_db=vector_db,
+                    vector_db=None,  # 先传None，后面会设置
                     config=self.plugin_config,
                 )
                 await self.user_prefs_handler.load_user_preferences()
@@ -116,6 +102,26 @@ class KnowledgeBasePlugin(Star):
                 # 用户偏好处理器失败不应该阻止插件启动
                 logger.warning("用户偏好处理器初始化失败，将创建默认实例")
                 self.user_prefs_handler = None
+
+            # 3. 初始化向量数据库
+            try:
+                from .vector_store.enhanced_faiss_store import EnhancedFaissStore
+                vector_db = EnhancedFaissStore(
+                    embedding_util=embedding_helper,
+                    data_path=self.persistent_data_root_path,
+                    user_prefs_handler=self.user_prefs_handler,
+                )
+                await vector_db.initialize()
+                
+                # 设置向量数据库到用户偏好处理器
+                if self.user_prefs_handler:
+                    self.user_prefs_handler.vector_db = vector_db
+                    
+                logger.info("✓ 向量数据库初始化成功")
+            except Exception as e:
+                failed_steps.append("vector_db")
+                logger.error(f"✗ 向量数据库初始化失败: {e}")
+                raise
 
             # 4. 初始化知识库服务
             try:
@@ -190,7 +196,7 @@ class KnowledgeBasePlugin(Star):
             if failed_steps:
                 logger.warning(f"以下组件初始化失败: {', '.join(failed_steps)}")
                 # 如果核心组件失败，不启动插件
-                critical_components = ["embedding_util", "vector_db", "kb_service", "document_service"]
+                critical_components = ["embedding_util", "user_prefs_handler", "vector_db", "kb_service", "document_service"]
                 failed_critical = [step for step in failed_steps if step in critical_components]
                 if failed_critical:
                     logger.error(f"关键组件初始化失败: {', '.join(failed_critical)}")

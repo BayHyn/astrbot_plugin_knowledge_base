@@ -222,6 +222,23 @@ class KnowledgeBaseWebAPI:
         if not await self.vec_db.collection_exists(collection_name):
             return Response().error("目标知识库不存在").__dict__
 
+        # 立即保存文件到临时位置
+        try:
+            # 生成安全的临时文件路径
+            temp_dir = os.path.join(get_astrbot_data_path(), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            safe_filename = self._generate_safe_filename(upload_file.filename)
+            temp_path = os.path.join(temp_dir, safe_filename)
+            
+            # 立即保存文件
+            await upload_file.save(temp_path)
+            logger.info(f"文件已保存到临时路径: {temp_path}")
+            
+        except Exception as e:
+            logger.error(f"保存上传文件失败: {e}")
+            return Response().error(f"保存文件失败: {str(e)}").__dict__
+
         task_id = f"task_{uuid.uuid4()}"
         self.tasks[task_id] = {"status": "pending", "result": None}
         logger.info(f"创建异步任务 {task_id} 用于处理文件 {upload_file.filename}")
@@ -229,7 +246,8 @@ class KnowledgeBaseWebAPI:
         asyncio.create_task(
             self._process_file_asynchronously(
                 task_id,
-                upload_file,
+                temp_path,  # 传递文件路径而不是文件对象
+                upload_file.filename,  # 传递原始文件名
                 collection_name,
                 chunk_size,
                 overlap,
@@ -239,14 +257,13 @@ class KnowledgeBaseWebAPI:
         return Response().ok(data={"task_id": task_id}, message="文件上传成功，正在后台处理。").__dict__
 
     async def _process_file_asynchronously(
-        self, task_id, upload_file, collection_name, chunk_size_str, overlap_str
+        self, task_id, temp_path, original_filename, collection_name, chunk_size_str, overlap_str
     ):
         """异步处理文件，增强容错性和并发安全性"""
         self.tasks[task_id]["status"] = "running"
-        temp_path = None
         
         try:
-            logger.info(f"[Task {task_id}] 开始处理文件: {upload_file.filename}")
+            logger.info(f"[Task {task_id}] 开始处理文件: {original_filename}")
             
             # 参数验证和转换
             try:
@@ -255,19 +272,11 @@ class KnowledgeBaseWebAPI:
             except (ValueError, TypeError) as e:
                 raise ValueError(f"无效的分块参数: {e}")
             
-            # 生成安全的临时文件路径
-            temp_dir = os.path.join(get_astrbot_data_path(), "temp")
-            os.makedirs(temp_dir, exist_ok=True)
+            # 验证文件是否存在
+            if not os.path.exists(temp_path):
+                raise ValueError("临时文件不存在")
             
-            safe_filename = self._generate_safe_filename(upload_file.filename)
-            temp_path = os.path.join(temp_dir, safe_filename)
-            
-            # 保存文件
-            try:
-                await upload_file.save(temp_path)
-                logger.info(f"[Task {task_id}] 文件已保存到临时路径: {temp_path}")
-            except Exception as e:
-                raise IOError(f"保存文件失败: {e}")
+            logger.info(f"[Task {task_id}] 开始解析文件: {temp_path}")
 
             # 解析文件内容
             try:
@@ -298,7 +307,7 @@ class KnowledgeBaseWebAPI:
                 Document(
                     text_content=chunk,
                     metadata={
-                        "source": upload_file.filename,
+                        "source": original_filename,
                         "user": "astrbot_webui",
                         "upload_time": int(time.time()),
                         "chunk_index": i,
@@ -316,7 +325,7 @@ class KnowledgeBaseWebAPI:
             except Exception as e:
                 raise ValueError(f"添加文档到数据库失败: {e}")
             
-            success_message = f"成功从文件 '{upload_file.filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。"
+            success_message = f"成功从文件 '{original_filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。"
             self.tasks[task_id] = {"status": "success", "result": success_message}
             logger.info(f"[Task {task_id}] 任务成功: {success_message}")
 
