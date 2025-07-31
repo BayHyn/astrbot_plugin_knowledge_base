@@ -1,6 +1,6 @@
 from typing import List, Callable
 
-
+# TODO 分块优化
 class RecursiveCharacterTextSplitter:
     def __init__(
         self,
