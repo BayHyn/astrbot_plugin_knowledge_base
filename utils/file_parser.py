@@ -206,8 +206,15 @@ class FileParser:
                 self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
                 self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
                 self.llm_enabled = True
+                
+                # 获取provider ID，使用meta()方法
+                try:
+                    provider_id = provider_config.meta().id
+                except Exception:
+                    provider_id = "unknown"
+                    
                 logger.info(
-                    f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name}, API: {api_url})。"
+                    f"FileParser: LLM客户端配置成功 (Provider: {provider_id}, Model: {self.model_name}, API: {api_url})。"
                 )
             else:
                 logger.warning("FileParser: LLM提供商配置不完整，基于LLM的解析将被禁用。")
