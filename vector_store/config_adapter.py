@@ -28,6 +28,7 @@ def create_rerank_config_from_astrbot(config: dict) -> dict:
             "max_retries": rerank_config.get("max_retries", 3),
             "enable_cache": rerank_config.get("enable_cache", True),
             "cache_ttl": rerank_config.get("cache_ttl", 3600),
+            "model_name": rerank_config.get("model_name", None),
         },
     }
 
@@ -65,6 +66,7 @@ def get_api_rerank_config_from_astrbot(config: dict) -> APIRerankConfig:
         max_retries=rerank_config.get("max_retries", 3),
         enable_cache=rerank_config.get("enable_cache", True),
         cache_ttl=rerank_config.get("cache_ttl", 3600),
+        model_name=rerank_config.get("model_name", None),
     )
 
 
@@ -85,16 +87,19 @@ def validate_rerank_config(config: dict) -> tuple[bool, str]:
 
     if strategy in ["api", "auto"]:
         provider = rerank_config.get("api_provider", "cohere")
-        if provider not in ["cohere", "jina", "custom"]:
+        if provider not in ["cohere", "jina", "openai", "custom"]:
             return False, f"无效的API提供商: {provider}"
 
-        if provider != "custom" and not rerank_config.get("api_key"):
-            # 检查环境变量
-            env_keys = {"cohere": "COHERE_API_KEY", "jina": "JINA_API_KEY"}
-            if not env_keys.get(provider) or not __import__("os").getenv(
-                env_keys[provider]
-            ):
-                return False, f"缺少{provider}的API密钥"
+        api_key = rerank_config.get("api_key", "")
+        api_url = rerank_config.get("api_url", "")
+        
+        # 对于所有提供商，如果配置了api_key就认为是有效的
+        if not api_key:
+            return False, f"缺少{provider}的API密钥"
+            
+        # 对于自定义提供商，还需要检查URL
+        if provider == "custom" and not api_url:
+            return False, "自定义提供商需要API URL"
 
     return True, ""
 
@@ -124,14 +129,9 @@ def get_rerank_config_summary(config: dict) -> dict:
     # 检查API密钥状态
     if strategy in ["api", "auto"]:
         api_key = rerank_config.get("api_key")
-        if not api_key:
-            env_keys = {"cohere": "COHERE_API_KEY", "jina": "JINA_API_KEY"}
-            env_key = env_keys.get(provider)
-            if env_key and __import__("os").getenv(env_key):
-                summary["api_key_status"] = "环境变量"
-            else:
-                summary["api_key_status"] = "未配置"
-        else:
+        if api_key:
             summary["api_key_status"] = "已配置"
+        else:
+            summary["api_key_status"] = "未配置"
 
     return summary

@@ -226,6 +226,10 @@ class EnhancedVectorStore(VectorDBBase):
         """列出所有集合"""
         return await self.enhanced_store.list_collections()
 
+    async def cleanup_corrupted_collections(self) -> List[str]:
+        """清理损坏的集合"""
+        return await self.enhanced_store.cleanup_corrupted_collections()
+
     async def count_documents(self, collection_name: str) -> int:
         """统计文档数量"""
         return await self.enhanced_store.count_documents(collection_name)

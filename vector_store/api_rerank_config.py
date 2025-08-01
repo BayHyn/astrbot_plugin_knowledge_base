@@ -13,7 +13,7 @@ class APIRerankConfig:
     """API重排序配置类"""
 
     # 服务提供商
-    provider: str = "cohere"  # cohere, jina, azure, custom
+    provider: str = "cohere"  # cohere, jina, openai, azure, custom
 
     # API配置
     api_key: str = ""
@@ -39,21 +39,12 @@ class APIRerankConfig:
 
     def __post_init__(self):
         """初始化后处理"""
-        # 从环境变量读取API密钥
-        if not self.api_key:
-            env_keys = {
-                "cohere": "COHERE_API_KEY",
-                "jina": "JINA_API_KEY",
-                "azure": "AZURE_OPENAI_API_KEY",
-                "custom": "CUSTOM_RERANK_API_KEY",
-            }
-            self.api_key = os.getenv(env_keys.get(self.provider, ""), "")
-
         # 设置默认API URL
         if not self.api_url:
             default_urls = {
                 "cohere": "https://api.cohere.ai/v1/rerank",
                 "jina": "https://api.jina.ai/v1/rerank",
+                "openai": "https://api.openai.com/v1/rerank",
                 "azure": "https://{resource}.openai.azure.com/openai/deployments/{deployment}/rerank",
                 "custom": "",
             }
@@ -61,10 +52,11 @@ class APIRerankConfig:
 
     def validate(self) -> bool:
         """验证配置有效性"""
-        if self.provider not in ["cohere", "jina", "azure", "custom"]:
+        if self.provider not in ["cohere", "jina", "openai", "azure", "custom"]:
             return False
 
-        if self.provider != "custom" and not self.api_key:
+        # 所有提供商都需要API密钥
+        if not self.api_key:
             return False
 
         if self.timeout <= 0 or self.max_retries <= 0:
