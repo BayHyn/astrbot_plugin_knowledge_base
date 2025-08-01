@@ -7,6 +7,7 @@ class LLMSettings(BaseModel):
 
     enable_llm_parser: bool = Field(True, description="启用LLM解析复杂文件，如图片")
     provider: Optional[str] = Field(None, description="来自AstrBot的LLM提供商ID")
+    model: Optional[str] = Field(None, description="LLV解析器使用的模型名称")
 
 
 class RerankSettings(BaseModel):
@@ -62,27 +63,32 @@ class PluginSettings(BaseModel):
                 return config[prefixed_key]
             return config.get(key, default_value)
         
-        # 处理重排序配置
+        # 处理嵌套配置
+        basic_config = get_config_value("basic_config", {})
+        text_processing = get_config_value("text_processing", {})
+        llm_parser = get_config_value("llm_parser", {})
+        kb_llm_enhancement = get_config_value("kb_llm_enhancement", {})
         rerank_config = get_config_value("rerank_config", {})
         
         return cls(
-            default_collection_name=get_config_value("default_collection_name", "general"),
-            faiss_db_subpath=get_config_value("faiss_db_subpath", "faiss_data"),
-            text_chunk_size=get_config_value("text_chunk_size", 300),
-            text_chunk_overlap=get_config_value("text_chunk_overlap", 100),
-            search_top_k=get_config_value("search_top_k", 3),
-            auto_create_collection=get_config_value("auto_create_collection", True),
-            enable_kb_llm_enhancement=get_config_value("enable_kb_llm_enhancement", True),
-            kb_llm_search_top_k=get_config_value("kb_llm_search_top_k", 3),
-            kb_llm_insertion_method=get_config_value("kb_llm_insertion_method", "prepend_prompt"),
-            kb_llm_min_similarity_score=get_config_value("kb_llm_min_similarity_score", 0.5),
-            kb_llm_context_template=get_config_value(
+            default_collection_name=basic_config.get("default_collection_name", "general"),
+            faiss_db_subpath=basic_config.get("faiss_db_subpath", "faiss_data"),
+            text_chunk_size=text_processing.get("text_chunk_size", 300),
+            text_chunk_overlap=text_processing.get("text_chunk_overlap", 100),
+            search_top_k=text_processing.get("search_top_k", 3),
+            auto_create_collection=basic_config.get("auto_create_collection", True),
+            enable_kb_llm_enhancement=kb_llm_enhancement.get("enable_kb_llm_enhancement", True),
+            kb_llm_search_top_k=kb_llm_enhancement.get("kb_llm_search_top_k", 3),
+            kb_llm_insertion_method=kb_llm_enhancement.get("kb_llm_insertion_method", "prepend_prompt"),
+            kb_llm_min_similarity_score=kb_llm_enhancement.get("kb_llm_min_similarity_score", 0.5),
+            kb_llm_context_template=kb_llm_enhancement.get(
                 "kb_llm_context_template",
                 "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。",
             ),
             llm_parser=LLMSettings(
-                enable_llm_parser=get_config_value("enable_llm_parser", True),
-                provider=get_config_value("llm_parser_provider"),
+                enable_llm_parser=llm_parser.get("enable_llm_parser", False),
+                provider=llm_parser.get("llm_parser_provider"),
+                model=llm_parser.get("llm_parser_model"),
             ),
             rerank=RerankSettings(
                 strategy=rerank_config.get("strategy", "auto"),

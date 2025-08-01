@@ -181,18 +181,21 @@ class FileParser:
             try:
                 available_models = await provider_config.get_models()
                 if available_models:
-                    # 使用配置中指定的模型，或者使用第一个可用模型
-                    self.model_name = provider_config.provider_config.get("model")
-                    if not self.model_name or self.model_name not in available_models:
+                    # 优先使用插件配置中指定的模型，然后是提供商配置中的模型，最后是第一个可用模型
+                    preferred_model = self.llm_settings.model or provider_config.provider_config.get("model")
+                    if preferred_model and preferred_model in available_models:
+                        self.model_name = preferred_model
+                        logger.info(f"FileParser: 使用指定模型: {self.model_name}")
+                    else:
                         self.model_name = available_models[0]
                         logger.info(f"FileParser: 使用默认模型: {self.model_name}")
                 else:
                     logger.warning("FileParser: 提供商没有可用的模型列表。")
-                    self.model_name = provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                    self.model_name = self.llm_settings.model or provider_config.provider_config.get("model", "gpt-3.5-turbo")
                     logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
             except Exception as e:
                 logger.warning(f"FileParser: 异步获取模型列表失败: {e}")
-                self.model_name = provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                self.model_name = self.llm_settings.model or provider_config.provider_config.get("model", "gpt-3.5-turbo")
                 logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
             
             if not api_key:
