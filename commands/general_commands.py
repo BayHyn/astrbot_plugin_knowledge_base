@@ -43,7 +43,7 @@ async def handle_kb_use_collection(
         return
 
     try:
-        await plugin.kb_service.set_user_default_collection(event, collection_name)
-        yield event.plain_result(f"已将当前会话默认知识库设置为: {collection_name}")
-    except ValueError as e:
-        yield event.plain_result(str(e))
+        async for result in plugin.user_prefs_handler.set_user_default_collection(event, collection_name):
+            yield result
+    except Exception as e:
+        yield event.plain_result(f"设置默认知识库失败: {e}")
