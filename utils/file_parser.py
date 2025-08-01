@@ -7,6 +7,7 @@ import aiofiles
 from aiofiles.os import stat as aio_stat
 import chardet
 import asyncio
+from ..config.settings import LLMSettings
 from ..core.constants import (
     COMMON_ENCODINGS,
     READ_FILE_LIMIT,
@@ -19,142 +20,277 @@ from markitdown_no_magika import MarkItDown
 from openai import AsyncOpenAI, OpenAI
 
 
-class LLM_Config:
-    """LLM配置类"""
+async def _detect_and_read_file(file_path: str) -> str:
+    """
+    检测文件编码并读取文件内容
+    """
+    content = None
+    detected_encoding = None
 
-    def __init__(self, context: Context, status: bool):
-        self.context = context
-        self.status = status
-        provider_config = self.context.get_using_provider()
-        if provider_config is None:
-            logger.error("未在 AstrBot 配置 LLM 服务商，请检查配置")
-            self.status = False
-        if self.status:
-            # 获取当前使用的 provider
-            self.api_key = provider_config.get_current_key()
-            self.api_url = provider_config.provider_config.get("api_base")
-            self.model_name = provider_config.get_model()
+    # 优化：对于非常大的文件，chardet 读取整个文件可能不理想
+    # 可以先读取头部一小部分来检测
+    try:
+        file_size = (await aio_stat(file_path)).st_size
+        read_limit = min(file_size, READ_FILE_LIMIT)
 
-            # 初始化 LLM 客户端
-            self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.api_url)
-            self.sync_client = OpenAI(api_key=self.api_key, base_url=self.api_url)
-            # 初始化 MarkItDown
-            self.md_converter = MarkItDown(
-                enable_plugins=True,
-                llm_client=self.async_client,
-                llm_model=self.model_name,
-            )
-            logger.info("配置LLM成功")
-        else:
-            self.md_converter = MarkItDown(enable_plugins=False)
-            logger.warning("未启用 LLM 大模型解析文件，图片和复杂文档解析可能失败")
+        async with aiofiles.open(file_path, "rb") as f_binary:
+            raw_head = await f_binary.read(read_limit)  # 读取头部
 
-    """文本文件解析类"""
+        if raw_head:
+            result = chardet.detect(raw_head)
+            detected_encoding = result["encoding"]
+            confidence = result["confidence"]
 
-    async def _detect_and_read_file(self, file_path: str) -> str:
-        """
-        检测文件编码并读取文件内容
-        """
-        content = None
-        detected_encoding = None
-
-        # 优化：对于非常大的文件，chardet 读取整个文件可能不理想
-        # 可以先读取头部一小部分来检测
-        try:
-            file_size = (await aio_stat(file_path)).st_size
-            read_limit = min(file_size, READ_FILE_LIMIT)
-
-            async with aiofiles.open(file_path, "rb") as f_binary:
-                raw_head = await f_binary.read(read_limit)  # 读取头部
-
-            if raw_head:
-                result = chardet.detect(raw_head)
-                detected_encoding = result["encoding"]
-                confidence = result["confidence"]
-
-                if detected_encoding and confidence > 0.7:
-                    logger.info(
-                        f"Chardet: {file_path} 编码={detected_encoding}, 置信度={confidence:.2f}"
-                    )
-                    try:
-                        # 如果 chardet 成功，用检测到的编码完整读取文件
-                        async with aiofiles.open(
-                            file_path, "r", encoding=detected_encoding, errors="ignore"
-                        ) as f:  # errors='ignore' 或 'replace' 可以增加容错
-                            content = await f.read()
-                        return content
-                    except UnicodeDecodeError:
-                        logger.warning(
-                            f"使用 Chardet 检测到的编码 {detected_encoding} 无法完整读取 {file_path}。尝试常用编码列表。"
-                        )
-                        content = None  # 确保回退
-                    except Exception as e_read_full:
-                        logger.warning(
-                            f"读取 {file_path} 时使用 Chardet 检测到的编码 {detected_encoding} 出错: {e_read_full}。尝试常用编码列表。"
-                        )
-                        content = None
-                else:
-                    logger.info(
-                        f"Chardet 对 {file_path} 的检测结果不确定 (编码: {detected_encoding}, 置信度: {confidence:.2f})。尝试常用编码列表。"
-                    )
-            else:  # 文件为空或非常小
+            if detected_encoding and confidence > 0.7:
                 logger.info(
-                    f"文件 {file_path} 为空或太小，无法进行 Chardet 检测。尝试常用编码列表。"
+                    f"Chardet: {file_path} 编码={detected_encoding}, 置信度={confidence:.2f}"
                 )
-
-        except FileNotFoundError:
-            logger.error(f"文件未找到: {file_path}")
-            raise
-        except Exception as e_chardet:
-            logger.warning(
-                f"对 {file_path} 进行 Chardet 检测时出错: {e_chardet}。尝试常用编码列表。"
-            )
-
-        # 如果 chardet 失败或未启用，尝试常用编码
-        if content is None:
-            for enc in COMMON_ENCODINGS:
                 try:
-                    async with aiofiles.open(file_path, "r", encoding=enc) as f:
+                    # 如果 chardet 成功，用检测到的编码完整读取文件
+                    async with aiofiles.open(
+                        file_path, "r", encoding=detected_encoding, errors="ignore"
+                    ) as f:  # errors='ignore' 或 'replace' 可以增加容错
                         content = await f.read()
-                    logger.info(f"成功使用编码 {enc} 读取文件 {file_path}")
                     return content
                 except UnicodeDecodeError:
-                    logger.debug(f"使用编码 {enc} 解码文件 {file_path} 失败")
-                except FileNotFoundError:  # 应该在 chardet 步骤就被捕获，但再次检查无妨
-                    logger.error(f"在尝试常用编码时文件未找到: {file_path}")
-                    raise
-                except Exception as e:
-                    logger.error(f"使用编码 {enc} 读取文件 {file_path} 时发生错误: {e}")
-                    # 考虑是否应该 break，如果不是解码错误
-                    # break
+                    logger.warning(
+                        f"使用 Chardet 检测到的编码 {detected_encoding} 无法完整读取 {file_path}。尝试常用编码列表。"
+                    )
+                    content = None  # 确保回退
+                except Exception as e_read_full:
+                    logger.warning(
+                        f"读取 {file_path} 时使用 Chardet 检测到的编码 {detected_encoding} 出错: {e_read_full}。尝试常用编码列表。"
+                    )
+                    content = None
+            else:
+                logger.info(
+                    f"Chardet 对 {file_path} 的检测结果不确定 (编码: {detected_encoding}, 置信度: {confidence:.2f})。尝试常用编码列表。"
+                )
+        else:  # 文件为空或非常小
+            logger.info(
+                f"文件 {file_path} 为空或太小，无法进行 Chardet 检测。尝试常用编码列表。"
+            )
 
-        if content is None:
-            logger.error(f"无法使用任何尝试过的编码解码文件 {file_path}")
-            # 最后的尝试：使用 utf-8 并替换无法解码的字符
+    except FileNotFoundError:
+        logger.error(f"文件未找到: {file_path}")
+        raise
+    except Exception as e_chardet:
+        logger.warning(
+            f"对 {file_path} 进行 Chardet 检测时出错: {e_chardet}。尝试常用编码列表。"
+        )
+
+    # 如果 chardet 失败或未启用，尝试常用编码
+    if content is None:
+        for enc in COMMON_ENCODINGS:
             try:
-                logger.warning(
-                    f"最终尝试：以 UTF-8 编码（替换错误字符）方式读取文件 {file_path}"
-                )
-                async with aiofiles.open(
-                    file_path, "r", encoding="utf-8", errors="replace"
-                ) as f:
+                async with aiofiles.open(file_path, "r", encoding=enc) as f:
                     content = await f.read()
+                logger.info(f"成功使用编码 {enc} 读取文件 {file_path}")
                 return content
-            except Exception as e_final:
-                logger.error(
-                    f"最终尝试使用 UTF-8 编码读取文件 {file_path}（替换模式）也失败: {e_final}"
+            except UnicodeDecodeError:
+                logger.debug(f"使用编码 {enc} 解码文件 {file_path} 失败")
+            except FileNotFoundError:  # 应该在 chardet 步骤就被捕获，但再次检查无妨
+                logger.error(f"在尝试常用编码时文件未找到: {file_path}")
+                raise
+            except Exception as e:
+                logger.error(f"使用编码 {enc} 读取文件 {file_path} 时发生错误: {e}")
+                # 考虑是否应该 break，如果不是解码错误
+                # break
+
+    if content is None:
+        logger.error(f"无法使用任何尝试过的编码解码文件 {file_path}")
+        # 最后的尝试：使用 utf-8 并替换无法解码的字符
+        try:
+            logger.warning(
+                f"最终尝试：以 UTF-8 编码（替换错误字符）方式读取文件 {file_path}"
+            )
+            async with aiofiles.open(
+                file_path, "r", encoding="utf-8", errors="replace"
+            ) as f:
+                content = await f.read()
+            return content
+        except Exception as e_final:
+            logger.error(
+                f"最终尝试使用 UTF-8 编码读取文件 {file_path}（替换模式）也失败: {e_final}"
+            )
+            raise ValueError(f"无法读取或解码文件: {file_path}")
+    return content
+
+
+class FileParser:
+    """文件解析器主类"""
+
+    def __init__(self, context: Context, llm_settings: LLMSettings):
+        self.context = context
+        self.llm_settings = llm_settings
+        self.llm_enabled = False
+        self.async_client = None
+        self.sync_client = None
+        self.model_name = None
+        # 延迟初始化，等到实际需要使用时再设置LLM客户端
+        self.md_converter = None
+        self._llm_setup_attempted = False
+
+    async def _setup_llm_clients(self):
+        """异步设置LLM客户端"""
+        if self._llm_setup_attempted:
+            return  # 避免重复设置
+        
+        self._llm_setup_attempted = True
+        
+        if not self.llm_settings.enable_llm_parser:
+            logger.info("FileParser: LLM解析功能已禁用。")
+            self.llm_enabled = False
+            self._setup_markitdown()
+            return
+
+        provider_config = None
+        provider_id = self.llm_settings.provider
+
+        if not provider_id:
+            logger.info("FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。")
+            provider_config = self.context.get_using_provider()
+            if not provider_config:
+                logger.warning("FileParser: 当前没有正在使用的LLM提供商。")
+        else:
+            logger.info(f"FileParser: 尝试使用指定的LLM提供商ID: {provider_id}")
+            provider_config = self.context.get_provider_by_id(provider_id)
+            if not provider_config:
+                logger.warning(f"FileParser: 未找到ID为 '{provider_id}' 的LLM提供商。")
+
+        if not provider_config:
+            # 如果没有找到指定提供商，列出所有可用的提供商供参考
+            all_providers = self.context.get_all_providers()
+            if all_providers:
+                provider_ids = [p.provider_id for p in all_providers]
+                logger.info(f"FileParser: 可用的LLM提供商ID列表: {provider_ids}")
+            else:
+                logger.warning("FileParser: 系统中没有配置任何LLM提供商。")
+            
+            logger.warning("FileParser: 无法获取LLM提供商配置，基于LLM的解析将被禁用。")
+            self.llm_enabled = False
+            self._setup_markitdown()
+            return
+
+        try:
+            # 获取提供商配置信息
+            api_key = provider_config.get_current_key()
+            api_url = provider_config.provider_config.get("api_base")
+            
+            # 获取模型信息：异步调用get_models()
+            try:
+                available_models = await provider_config.get_models()
+                if available_models:
+                    # 优先使用插件配置中指定的模型，然后是提供商配置中的模型，最后是第一个可用模型
+                    preferred_model = self.llm_settings.model or provider_config.provider_config.get("model")
+                    if preferred_model and preferred_model in available_models:
+                        self.model_name = preferred_model
+                        logger.info(f"FileParser: 使用指定模型: {self.model_name}")
+                    else:
+                        self.model_name = available_models[0]
+                        logger.info(f"FileParser: 使用默认模型: {self.model_name}")
+                else:
+                    logger.warning("FileParser: 提供商没有可用的模型列表。")
+                    self.model_name = self.llm_settings.model or provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                    logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
+            except Exception as e:
+                logger.warning(f"FileParser: 异步获取模型列表失败: {e}")
+                self.model_name = self.llm_settings.model or provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
+            
+            if not api_key:
+                logger.warning("FileParser: LLM提供商API密钥为空。")
+            if not api_url:
+                logger.warning("FileParser: LLM提供商API地址为空。")
+            if not self.model_name:
+                logger.warning("FileParser: LLM提供商模型名称为空。")
+            
+            if api_key and api_url and self.model_name:
+                self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
+                self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
+                self.llm_enabled = True
+                
+                # 获取provider ID，使用meta()方法
+                try:
+                    provider_id = provider_config.meta().id
+                except Exception:
+                    provider_id = "unknown"
+                    
+                logger.info(
+                    f"FileParser: LLM客户端配置成功 (Provider: {provider_id}, Model: {self.model_name}, API: {api_url})。"
                 )
-                raise ValueError(f"无法读取或解码文件: {file_path}")
-        return content
+            else:
+                logger.warning("FileParser: LLM提供商配置不完整，基于LLM的解析将被禁用。")
+                self.llm_enabled = False
+                
+        except Exception as e:
+            logger.error(f"FileParser: 获取LLM提供商配置时出错: {e}，基于LLM的解析将被禁用。", exc_info=True)
+            self.llm_enabled = False
 
-    """图片解析"""
+        self._setup_markitdown()
 
-    def image_converter(self, base64_image: str, image_format: str) -> str:
-        if not self.status:
-            logger.warning("未启用LLM大模型解析文件，无法解析图片")
+    def _setup_markitdown(self):
+        """设置MarkItDown转换器"""
+        try:
+            if self.llm_enabled:
+                self.md_converter = MarkItDown(
+                    enable_plugins=True,
+                    llm_client=self.async_client,
+                    llm_model=self.model_name,
+                )
+                logger.info("FileParser: MarkItDown初始化成功，启用LLM插件。")
+            else:
+                self.md_converter = MarkItDown(enable_plugins=False)
+                logger.info("FileParser: MarkItDown初始化成功，禁用LLM插件。")
+        except Exception as e:
+            logger.error(f"FileParser: MarkItDown初始化失败: {e}，将影响复杂文件解析功能。", exc_info=True)
+            # 即使MarkItDown初始化失败，也要创建一个基础实例
+            try:
+                self.md_converter = MarkItDown(enable_plugins=False)
+                logger.info("FileParser: 使用基础MarkItDown配置。")
+            except Exception as e2:
+                logger.error(f"FileParser: 基础MarkItDown初始化也失败: {e2}")
+                self.md_converter = None
+
+    async def _parse_text(self, file_path: str) -> Optional[str]:
+        try:
+            return await _detect_and_read_file(file_path)
+        except Exception as e:
+            logger.error(f"解析文本文件 {file_path} 时出错: {e}")
+            return None
+
+    async def _parse_markdown(self, file_path: str) -> Optional[str]:
+        try:
+            if not self.md_converter:
+                logger.warning(f"MarkItDown未正确初始化，无法解析文件: {file_path}")
+                # 尝试作为普通文本读取
+                return await _detect_and_read_file(file_path)
+                
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: self.md_converter.convert(file_path)
+            )
+            return result.text_content
+        except Exception as e:
+            logger.error(f"MarkItDown转换失败: {file_path}: {e}")
+            # 回退到普通文本读取
+            try:
+                logger.info(f"尝试作为普通文本读取文件: {file_path}")
+                return await _detect_and_read_file(file_path)
+            except Exception as e2:
+                logger.error(f"作为普通文本读取也失败: {file_path}: {e2}")
+                return None
+
+    async def _parse_image(self, file_path: str) -> Optional[str]:
+        if not self.llm_enabled:
+            logger.warning("LLM解析器未启用，无法解析图像。")
             return None
         try:
-            response = self.sync_client.chat.completions.create(
+            with open(file_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+            image_format = os.path.splitext(file_path)[1].lstrip(".")
+
+            response = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {
@@ -167,7 +303,7 @@ class LLM_Config:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/{image_format.lstrip('.')};base64,{base64_image}"
+                                    "url": f"data:image/{image_format};base64,{base64_image}"
                                 },
                             },
                         ],
@@ -175,19 +311,20 @@ class LLM_Config:
                 ],
             )
             return response.choices[0].message.content
-
         except Exception as e:
-            logger.error(f"图片解析失败 {e}")
+            logger.error(f"图像解析失败: {file_path}: {e}")
             return None
 
-    """音频解析"""
-
-    def audio_converter(self, base64_audio: str, audio_format: str) -> str:
-        if not self.status:
-            logger.warning("未启用LLM大模型解析文件，无法解析音频")
+    async def _parse_audio(self, file_path: str) -> Optional[str]:
+        if not self.llm_enabled:
+            logger.warning("LLM解析器未启用，无法解析音频。")
             return None
         try:
-            response = self.sync_client.chat.completions.create(
+            with open(file_path, "rb") as audio_file:
+                base64_audio = base64.b64encode(audio_file.read()).decode("utf-8")
+            audio_format = os.path.splitext(file_path)[1].lstrip(".")
+
+            response = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {
@@ -201,7 +338,7 @@ class LLM_Config:
                                 "type": "input_audio",
                                 "input_audio": {
                                     "data": base64_audio,
-                                    "format": audio_format.lstrip("."),
+                                    "format": audio_format,
                                 },
                             },
                         ],
@@ -209,132 +346,9 @@ class LLM_Config:
                 ],
             )
             return response.choices[0].message.content
-
         except Exception as e:
-            logger.error(f"音频解析失败 {e}")
+            logger.error(f"音频解析失败: {file_path}: {e}")
             return None
-
-
-class TextFileParser:
-    def __init__(self, llm_config: LLM_Config):
-        self._detect_and_read_file = llm_config._detect_and_read_file
-
-    async def parse(self, file_path: str) -> Optional[str]:
-        """
-        异步读取并解析文件内容。
-
-        Args:
-            file_path: 文件路径。
-
-        Returns:
-            文件文本内容，如果解析失败则返回 None。
-        """
-        try:
-            content = await self._detect_and_read_file(file_path=file_path)
-            if content is None:
-                logger.error(f"无法读取文件 {file_path}，请检查文件编码")
-                return None
-            return content
-        except Exception as e:
-            logger.error(f"解析文本文件 {file_path} 时发生错误: {e}")
-            return None
-
-
-class MarkdownFileParser:
-    """Markdown和复杂文本文件解析器"""
-
-    def __init__(self, llm_config: LLM_Config):
-        self.md_converter = llm_config.md_converter
-
-    async def parse(self, file_path: str) -> Optional[str]:
-        """解析Markdown文件"""
-        try:
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None, lambda: self.md_converter.convert(file_path)
-            )
-            return result.text_content
-        except Exception as e:
-            logger.error(f"MarkItDown 转换文件失败 {file_path}: {e}")
-            return None
-
-
-class ImageFileParser:
-    """图片文件解析器"""
-
-    def __init__(self, llm_config: LLM_Config):
-        self.image_converter = llm_config.image_converter
-
-    def _encode_image(self, file_path: str) -> str:
-        """
-        将图片转换为base64编码
-        """
-        try:
-            with open(file_path, "rb") as image_file:
-                return base64.b64encode(image_file.read()).decode("utf-8")
-        except Exception as e:
-            logger.error(f"图片编码失败 {file_path}: {e}")
-            raise
-
-    async def parse(self, file_path: str) -> Optional[str]:
-        """解析图片文件"""
-        try:
-            loop = asyncio.get_running_loop()
-            base64_image = self._encode_image(file_path)
-            image_format = os.path.splitext(file_path)[1]
-            result = await loop.run_in_executor(
-                None, lambda: self.image_converter(base64_image, image_format)
-            )
-            logger.info(f"图片转换结果：{result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"图片转换失败 {file_path}: {e}")
-            return None
-
-
-class AudioFileParser:
-    """音频文件解析器"""
-
-    def __init__(self, llm_config: LLM_Config):
-        self.audio_converter = llm_config.audio_converter
-
-    def _encode_audio(self, file_path: str) -> str:
-        """
-        将音频转换为base64编码
-        """
-        try:
-            with open(file_path, "rb") as audio_file:
-                return base64.b64encode(audio_file.read()).decode("utf-8")
-        except Exception as e:
-            logger.error(f"音频编码失败 {file_path}: {e}")
-            raise
-
-    async def parse(self, file_path: str) -> Optional[str]:
-        """解析音频文件"""
-        try:
-            loop = asyncio.get_running_loop()
-            base64_audio = self._encode_audio(file_path)
-            audio_format = os.path.splitext(file_path)[1]
-            result = await loop.run_in_executor(
-                None, lambda: self.audio_converter(base64_audio, audio_format)
-            )
-            logger.info(f"音频转换结果：{result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"音频转换失败 {file_path}: {e}")
-            return None
-
-
-class FileParser:
-    """文件解析器主类"""
-
-    def __init__(self, llm_config: LLM_Config):
-        self.text_parser = TextFileParser(llm_config)
-        self.markdown_parser = MarkdownFileParser(llm_config)
-        self.image_parser = ImageFileParser(llm_config)
-        self.audio_parser = AudioFileParser(llm_config)
 
     async def parse_file_content(self, file_path: str) -> Optional[str]:
         """
@@ -346,19 +360,23 @@ class FileParser:
         Returns:
             文件文本内容，如果解析失败则返回 None。
         """
+        # 确保LLM客户端已经设置
+        if not self._llm_setup_attempted:
+            await self._setup_llm_clients()
+            
         try:
             _, extension = os.path.splitext(file_path)
             extension = extension.lower()
 
             # 根据文件类型选择对应的解析器
             if extension in TEXT_EXTENSIONS:
-                return await self.text_parser.parse(file_path)
+                return await self._parse_text(file_path)
             elif extension in IMAGE_EXTENSIONS:
-                return await self.image_parser.parse(file_path)
+                return await self._parse_image(file_path)
             elif extension in MARKITDOWN_EXTENSIONS:
-                return await self.markdown_parser.parse(file_path)
+                return await self._parse_markdown(file_path)
             elif extension in AUDIO_EXTENSIONS:
-                return await self.audio_parser.parse(file_path)
+                return await self._parse_audio(file_path)
             else:
                 logger.warning(f"不支持的文件类型: {extension}，文件路径: {file_path}")
                 return None

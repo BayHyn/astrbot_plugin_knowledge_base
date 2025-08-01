@@ -1,75 +1,118 @@
 {
-    "vector_db_type": {
-        "description": "选择向量数据库类型",
-        "type": "string",
-        "default": "faiss",
-        "options": [
-            "faiss"
-        ]
+    "basic_config": {
+        "description": "基础配置",
+        "type": "object",
+        "hint": "知识库插件的基础运行配置",
+        "items": {
+            "default_collection_name": {
+                "description": "默认知识库集合名称",
+                "type": "string",
+                "default": "general"
+            },
+            "faiss_db_subpath": {
+                "description": "Faiss 索引存储子路径",
+                "type": "string",
+                "default": "faiss_data",
+                "hint": "相对于持久化数据目录的子路径"
+            },
+            "auto_create_collection": {
+                "description": "自动创建知识库集合",
+                "type": "bool",
+                "default": true,
+                "hint": "当指定的知识库集合不存在时，是否自动创建"
+            }
+        }
     },
-    "default_collection_name": {
-        "description": "默认知识库集合名称",
-        "type": "string",
-        "default": "general"
+    "text_processing": {
+        "description": "文本处理配置",
+        "type": "object",
+        "hint": "文本分块和搜索相关配置",
+        "items": {
+            "text_chunk_size": {
+                "description": "文本分块大小 (字符数)",
+                "type": "int",
+                "default": 300
+            },
+            "text_chunk_overlap": {
+                "description": "文本分块重叠大小 (字符数)",
+                "type": "int",
+                "default": 100
+            },
+            "search_top_k": {
+                "description": "搜索时默认返回的结果数量",
+                "type": "int",
+                "default": 3
+            }
+        }
     },
-    "faiss_db_subpath": {
-        "description": "Faiss 索引存储子路径 ",
-        "type": "string",
-        "default": "faiss_data",
-        "hint": "(相对于持久化数据目录 'AstrBot/data/plugins_data/astrbot_plugin_knowledge_base/')"
+    "llm_parser": {
+        "description": "LLM文件解析器配置",
+        "type": "object",
+        "hint": "配置LLM用于解析复杂文件（如图片、音频等）",
+        "items": {
+            "enable_llm_parser": {
+                "description": "启用LLM解析复杂文件",
+                "type": "bool",
+                "default": false,
+                "hint": "启用后可解析图片中的文字等，会消耗LLM提供商Token（仅支持OpenAI兼容的提供商）"
+            },
+            "llm_parser_provider": {
+                "description": "LLM解析器提供商ID",
+                "type": "string",
+                "default": "",
+                "hint": "从AstrBot的LLM提供商中选择一个ID，为空时使用默认提供商"
+            },
+            "llm_parser_model": {
+                "description": "LLM解析器使用的模型名称",
+                "type": "string",
+                "default": "",
+                "hint": "指定LLM解析器使用的模型，为空时使用提供商的默认模型"
+            }
+        }
     },
-    "text_chunk_size": {
-        "description": "文本分块大小 (字符数)",
-        "type": "int",
-        "default": 300
-    },
-    "text_chunk_overlap": {
-        "description": "文本分块重叠大小 (字符数)",
-        "type": "int",
-        "default": 100
-    },
-    "search_top_k": {
-        "description": "搜索时默认返回的结果数量",
-        "type": "int",
-        "default": 3
-    },
-    "auto_create_collection": {
-        "description": "当指定的知识库集合不存在时，是否自动创建",
-        "type": "bool",
-        "default": true
-    },
-    "LLM_model": {
-        "description": "是否启用LLM大模型解析文件",
-        "type": "bool",
-        "default": false,
-        "hint": "如果启用，则会消耗AstrBot当前使用的提供商Token。（仅支持OpenAI兼容的提供商）"
-    },
-    "embedding_api_url": {
-        "description": "[备用] OpenAI 兼容的 Embedding API 地址 ",
-        "type": "string",
-        "default": "https://api.openai.com/v1",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。（此项为 AstrBot 版本 < 3.5.13 用户设计，其他版本用户请忽略）"
-    },
-    "embedding_api_key": {
-        "description": "[备用] Embedding API 密钥",
-        "type": "string",
-        "default": "sk-your-key",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。（此项为 AstrBot 版本 < 3.5.13 用户设计，其他版本用户请忽略）"
-    },
-    "embedding_model_name": {
-        "description": "[备用] Embedding 模型名称",
-        "type": "string",
-        "default": "text-embedding-v3",
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。（此项为 AstrBot 版本 < 3.5.13 用户设计，其他版本用户请忽略）"
-    },
-    "embedding_dimension": {
-        "description": "[备用] Embedding 向量维度",
-        "type": "int",
-        "default": 1024,
-        "hint": "当在 WebUI 知识库页面指定了知识库的 AstrBot 嵌入模型提供商时，本配置失效。（此项为 AstrBot 版本 < 3.5.13 用户设计，其他版本用户请忽略）"
+    "kb_llm_enhancement": {
+        "description": "知识库LLM增强配置",
+        "type": "object",
+        "hint": "配置知识库内容如何增强LLM对话",
+        "items": {
+            "enable_kb_llm_enhancement": {
+                "description": "启用知识库LLM增强",
+                "type": "bool",
+                "default": true,
+                "hint": "在LLM对话中自动检索并注入相关的知识库内容"
+            },
+            "kb_llm_search_top_k": {
+                "description": "LLM增强检索的文档数量",
+                "type": "int",
+                "default": 3,
+                "hint": "为LLM对话检索的相关文档数量"
+            },
+            "kb_llm_insertion_method": {
+                "description": "知识库内容插入方式",
+                "type": "string",
+                "default": "prepend_prompt",
+                "options": [
+                    "prepend_prompt",
+                    "system_prompt"
+                ],
+                "hint": "prepend_prompt: 在用户消息前插入；system_prompt: 在系统消息中插入"
+            },
+            "kb_llm_min_similarity_score": {
+                "description": "文档相关性最低分数",
+                "type": "float",
+                "default": 0.5,
+                "hint": "只有相似度分数高于此值的文档才会被用于LLM增强"
+            },
+            "kb_llm_context_template": {
+                "description": "知识库上下文模板",
+                "type": "text",
+                "default": "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。",
+                "hint": "用于包装知识库上下文的模板，{retrieved_contexts}会被替换为检索到的内容"
+            }
+        }
     },
     "rerank_config": {
-        "description": "重排序配置（API服务优先，轻量化处理）",
+        "description": "重排序配置",
         "type": "object",
         "hint": "配置API重排序服务，实现零依赖启动和轻量化处理",
         "items": {
@@ -80,10 +123,9 @@
                 "options": [
                     "auto",
                     "api",
-                    "cross_encoder",
                     "simple"
                 ],
-                "hint": "auto: 自动选择最佳策略；api: 使用API重排序；cross_encoder: 使用本地Cross-Encoder；simple: 使用简单重排序"
+                "hint": "auto: 自动选择最佳策略；api: 使用API重排序；simple: 使用简单重排序"
             },
             "api_provider": {
                 "description": "API重排序服务提供商",
@@ -92,6 +134,7 @@
                 "options": [
                     "cohere",
                     "jina",
+                    "openai",
                     "custom"
                 ],
                 "hint": "仅当 strategy 为 'api' 或 'auto' 时有效"
@@ -100,13 +143,19 @@
                 "description": "API重排序服务密钥",
                 "type": "string",
                 "default": "",
-                "hint": "对应提供商的API密钥，支持环境变量：COHERE_API_KEY, JINA_API_KEY"
+                "hint": "对应提供商的API密钥"
             },
             "api_url": {
                 "description": "自定义API重排序服务地址",
                 "type": "string",
                 "default": "",
-                "hint": "仅当 api_provider 为 'custom' 时有效"
+                "hint": "自定义API服务地址，为空时使用默认地址"
+            },
+            "model_name": {
+                "description": "重排序模型名称",
+                "type": "string",
+                "default": "",
+                "hint": "使用的重排序模型名称，为空时使用默认模型"
             },
             "enable_cache": {
                 "description": "启用API重排序缓存",

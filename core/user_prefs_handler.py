@@ -3,20 +3,21 @@ import json
 import os
 from typing import Dict, AsyncGenerator, TYPE_CHECKING
 
-from astrbot.api import logger, AstrBotConfig
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from ..config.settings import PluginSettings
 if TYPE_CHECKING:
     from ..vector_store.base import VectorDBBase
 
 
 class UserPrefsHandler:
     def __init__(
-        self, prefs_path: str, vector_db: "VectorDBBase", config: AstrBotConfig
+        self, prefs_path: str, vector_db: "VectorDBBase", config: PluginSettings
     ):
         self.user_prefs_path = prefs_path
         self.user_collection_preferences: Dict[str, str] = {}
         self.vector_db = vector_db
-        self.config = config
+        self.settings = config
 
     async def load_user_preferences(self):
         try:
@@ -45,14 +46,14 @@ class UserPrefsHandler:
     def get_user_default_collection(self, event: AstrMessageEvent) -> str:
         user_key = event.unified_msg_origin
         return self.user_collection_preferences.get(
-            user_key, self.config.get("default_collection_name", "general")
+            user_key, self.settings.default_collection_name
         )
 
     async def set_user_default_collection(
         self, event: AstrMessageEvent, collection_name: str
     ) -> AsyncGenerator[AstrMessageEvent, None]:
         if not await self.vector_db.collection_exists(collection_name):
-            if self.config.get("auto_create_collection", True):
+            if self.settings.auto_create_collection:
                 try:
                     await self.vector_db.create_collection(collection_name)
                     logger.info(f"自动创建知识库 '{collection_name}' 成功。")

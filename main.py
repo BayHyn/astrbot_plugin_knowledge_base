@@ -14,34 +14,17 @@ from astrbot.core.config.default import VERSION
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
 
-
-from .core import constants
-from .utils.installation import ensure_vector_db_dependencies
-from .utils.embedding import EmbeddingUtil, EmbeddingSolutionHelper
-from .utils.text_splitter import TextSplitterUtil
-from .utils.file_parser import FileParser, LLM_Config
-from .vector_store.base import VectorDBBase
-
-if VERSION < "3.5.13":
-    logger.info("建议升级至 AstrBot v3.5.13 或更高版本。")
-    from .vector_store.faiss_store import FaissStore
-else:
-    from .vector_store.enhanced_wrapper import EnhancedVectorStore
-from .vector_store.milvus_lite_store import MilvusLiteStore
-from .vector_store.milvus_store import MilvusStore
-from .web_api import KnowledgeBaseWebAPI
+from .config.settings import PluginSettings
+from .services.document_service import DocumentService
+from .services.kb_service import KnowledgeBaseService
+from .services.llm_enhancer_service import LLMEnhancerService
 from .core.user_prefs_handler import UserPrefsHandler
-from .core.llm_enhancer import clean_contexts_from_kb_content, enhance_request_with_kb
-from .commands import (
-    general_commands,
-    add_commands,
-    search_commands,
-    manage_commands,
-)
+from .web_api import KnowledgeBaseWebAPI
+from .commands import general_commands
 
 
 @register(
-    constants.PLUGIN_REGISTER_NAME,
+    "astrbot_plugin_knowledge_base",
     "lxfight",
     "一个支持多种向量数据库的知识库插件",
     "0.5.4",
@@ -53,17 +36,20 @@ class KnowledgeBasePlugin(Star):
         self.config = config
         self._initialize_basic_paths()
 
-        self.vector_db: Optional[VectorDBBase] = None
-        self.embedding_util: Optional[EmbeddingSolutionHelper] = None
-        self.text_splitter: Optional[TextSplitterUtil] = None
-        self.file_parser: Optional[FileParser] = None
+        # Services
+        self.kb_service: Optional[KnowledgeBaseService] = None
+        self.document_service: Optional[DocumentService] = None
+        self.llm_enhancer_service: Optional[LLMEnhancerService] = None
         self.user_prefs_handler: Optional[UserPrefsHandler] = None
 
-        ensure_vector_db_dependencies(self.config.get("vector_db_type", "faiss"))
+        # Initialize plugin config
+        self.plugin_config = PluginSettings.from_astrbot_config(config)
+
+        # Start initialization
         self.init_task = asyncio.create_task(self._initialize_components())
 
     def _initialize_basic_paths(self):
-        self.plugin_name_for_path = constants.PLUGIN_REGISTER_NAME
+        self.plugin_name_for_path = "astrbot_plugin_knowledge_base"
         self.persistent_data_root_path = StarTools.get_data_dir(
             self.plugin_name_for_path
         )
@@ -74,157 +60,201 @@ class KnowledgeBasePlugin(Star):
         )
 
     async def _initialize_components(self):
+        """初始化组件，增强容错性"""
+        logger.info("知识库插件开始初始化...")
+        
+        # 初始化状态跟踪
+        initialization_steps = [
+            "embedding_util",
+            "user_prefs_handler",
+            "vector_db", 
+            "kb_service",
+            "document_service", 
+            "llm_enhancer_service",
+            "web_api"
+        ]
+        
+        failed_steps = []
+        
         try:
-            logger.info("知识库插件开始初始化...")
-
-            # Embedding Util
+            # 1. 初始化嵌入工具 - 直接使用AstrBot内置的提供商
             try:
-                embedding_plugin = self.context.get_registered_star(
-                    "astrbot_plugin_embedding_adapter"
-                )
-                if embedding_plugin:
-                    embedding_util = embedding_plugin.star_cls
-                    dim = embedding_util.get_dim()
-                    model_name = embedding_util.get_model_name()
-                    self.embedding_util = EmbeddingSolutionHelper(
-                        curr_embedding_dimensions=dim,
-                        curr_embedding_util=embedding_util,
-                        context=self.context,
-                        user_prefs_handler=self.user_prefs_handler,
-                    )
-                    if dim is not None and model_name is not None:
-                        self.config["embedding_dimension"] = dim
-                        self.config["embedding_model_name"] = model_name
-                    logger.info("成功加载并使用 astrbot_plugin_embedding_adapter。")
+                from .utils.embedding import EmbeddingUtil
+                embedding_helper = EmbeddingUtil(provider_context=self.context)
+                logger.info("✓ 嵌入工具初始化成功")
             except Exception as e:
-                logger.warning(f"嵌入服务适配器插件加载失败: {e}", exc_info=True)
-                self.embedding_util = None  # Fallback
+                failed_steps.append("embedding_util")
+                logger.error(f"✗ 嵌入工具初始化失败: {e}")
+                raise
 
-            if self.embedding_util is None:  # If adapter failed or not found
-                embedding_util = EmbeddingUtil(
-                    api_url=self.config.get("embedding_api_url"),
-                    api_key=self.config.get("embedding_api_key"),
-                    model_name=self.config.get("embedding_model_name"),
+            # 2. 初始化用户偏好处理器（需要在向量数据库之前初始化）
+            try:
+                self.user_prefs_handler = UserPrefsHandler(
+                    prefs_path=self.user_prefs_path,
+                    vector_db=None,  # 先传None，后面会设置
+                    config=self.plugin_config,
                 )
-                self.embedding_util = EmbeddingSolutionHelper(
-                    curr_embedding_dimensions=self.config.get(
-                        "embedding_dimension", 1024
-                    ),
-                    curr_embedding_util=embedding_util,
-                    context=self.context,
+                await self.user_prefs_handler.load_user_preferences()
+                logger.info("✓ 用户偏好处理器初始化成功")
+            except Exception as e:
+                failed_steps.append("user_prefs_handler")
+                logger.error(f"✗ 用户偏好处理器初始化失败: {e}")
+                # 用户偏好处理器失败不应该阻止插件启动
+                logger.warning("用户偏好处理器初始化失败，将创建默认实例")
+                self.user_prefs_handler = None
+
+            # 3. 初始化向量数据库（使用增强包装器）
+            try:
+                from .vector_store.enhanced_wrapper import EnhancedVectorStore
+                from .vector_store.config_adapter import create_rerank_config_from_astrbot
+                
+                # 从 AstrBot 配置创建重排序配置
+                rerank_config = create_rerank_config_from_astrbot(self.config)
+                
+                vector_db = EnhancedVectorStore(
+                    embedding_util=embedding_helper,
+                    data_path=self.persistent_data_root_path,
+                    rerank_config=rerank_config,
                     user_prefs_handler=self.user_prefs_handler,
                 )
-            logger.info("Embedding 工具初始化完成。")
-
-            # Text Splitter
-            self.text_splitter = TextSplitterUtil(
-                chunk_size=self.config.get("text_chunk_size"),
-                chunk_overlap=self.config.get("text_chunk_overlap"),
-            )
-            logger.info("文本分割工具初始化完成。")
-
-            # File Parser
-            self.llm_config = LLM_Config(
-                context=self.context, status=self.config.get("LLM_model")
-            )
-            self.file_parser = FileParser(self.llm_config)
-            logger.info("文件解析器初始化完成。")
-
-            # Vector DB
-            db_type = self.config.get("vector_db_type", "faiss")
-
-            # 构建重排序配置
-            from .vector_store.config_adapter import create_rerank_config_from_astrbot
-            rerank_config = create_rerank_config_from_astrbot(self.config)
-
-            if db_type == "faiss":
-                faiss_subpath = self.config.get("faiss_db_subpath", "faiss_data")
-                faiss_full_path = os.path.join(
-                    self.persistent_data_root_path, faiss_subpath
-                )
+                await vector_db.initialize()
                 
-                # 使用增强的向量存储（支持API重排序）
-                if VERSION < "3.5.13":
-                    from .vector_store.faiss_store import FaissStore
-                    self.vector_db = FaissStore(self.embedding_util, faiss_full_path)
-                else:
-                    from .vector_store.enhanced_wrapper import EnhancedVectorStore
-                    self.vector_db = EnhancedVectorStore(
-                        self.embedding_util,
-                        faiss_full_path,
-                        rerank_config=rerank_config
-                    )
-            elif db_type == "milvus_lite":
-                milvus_lite_subpath = self.config.get(
-                    "milvus_lite_db_subpath", "milvus_lite_data/milvus_lite.db"
+                # 设置向量数据库到用户偏好处理器
+                if self.user_prefs_handler:
+                    self.user_prefs_handler.vector_db = vector_db
+                    
+                logger.info("✓ 向量数据库初始化成功")
+            except Exception as e:
+                failed_steps.append("vector_db")
+                logger.error(f"✗ 向量数据库初始化失败: {e}")
+                raise
+
+            # 4. 初始化知识库服务
+            try:
+                self.kb_service = KnowledgeBaseService(
+                    vector_db=vector_db,
+                    user_prefs_handler=self.user_prefs_handler,
+                    settings=self.plugin_config,
                 )
-                milvus_lite_full_path = os.path.join(
-                    self.persistent_data_root_path, milvus_lite_subpath
-                )
-                os.makedirs(os.path.dirname(milvus_lite_full_path), exist_ok=True)
+                logger.info("✓ 知识库服务初始化成功")
+            except Exception as e:
+                failed_steps.append("kb_service")
+                logger.error(f"✗ 知识库服务初始化失败: {e}")
+                raise
+
+            # 5. 初始化文档服务
+            try:
+                from .utils.file_parser import FileParser
+                from .utils.text_splitter import TextSplitterUtil
+
+                file_parser = FileParser(self.context, self.plugin_config.llm_parser)
+                # 异步设置LLM客户端
+                await file_parser._setup_llm_clients()
                 
-                # 注意：MilvusLiteStore暂不支持API重排序
-                self.vector_db = MilvusLiteStore(
-                    self.embedding_util, milvus_lite_full_path
+                text_splitter = TextSplitterUtil(
+                    chunk_size=self.plugin_config.text_chunk_size,
+                    chunk_overlap=self.plugin_config.text_chunk_overlap
                 )
-            elif db_type == "milvus":
-                # 注意：MilvusStore暂不支持API重排序
-                self.vector_db = MilvusStore(
-                    self.embedding_util,
-                    data_path="",
-                    host=self.config.get("milvus_host"),
-                    port=self.config.get("milvus_port"),
-                    user=self.config.get("milvus_user"),
-                    password=self.config.get("milvus_password"),
+                self.document_service = DocumentService(
+                    vector_db=vector_db,
+                    kb_service=self.kb_service,
+                    file_parser=file_parser,
+                    text_splitter=text_splitter,
+                    data_path=self.persistent_data_root_path,
                 )
-            else:
-                logger.error(f"不支持的向量数据库类型: {db_type}，请检查配置。")
-                return
-            
-            # User Preferences Handler
-            self.user_prefs_handler = UserPrefsHandler(
-                self.user_prefs_path, self.vector_db, self.config
-            )
-            await self.user_prefs_handler.load_user_preferences()
+                logger.info("✓ 文档服务初始化成功")
+            except Exception as e:
+                failed_steps.append("document_service")
+                logger.error(f"✗ 文档服务初始化失败: {e}")
+                raise
 
-            if self.vector_db:
-                await self.vector_db.initialize()
-                logger.info(f"向量数据库 '{db_type}' 初始化完成。")
+            # 6. 初始化LLM增强服务
+            try:
+                self.llm_enhancer_service = LLMEnhancerService(
+                    vector_db=vector_db,
+                    user_prefs_handler=self.user_prefs_handler,
+                    settings=self.plugin_config,
+                )
+                logger.info("✓ LLM增强服务初始化成功")
+            except Exception as e:
+                failed_steps.append("llm_enhancer_service")
+                logger.error(f"✗ LLM增强服务初始化失败: {e}")
+                # LLM增强服务失败不应该阻止插件启动
+                logger.warning("LLM增强服务初始化失败，RAG功能将不可用")
+                self.llm_enhancer_service = None
 
-            # Web API
+            # 7. 初始化Web API
             try:
                 self.web_api = KnowledgeBaseWebAPI(
-                    vec_db=self.vector_db,
-                    text_splitter=self.text_splitter,
+                    kb_service=self.kb_service,
+                    document_service=self.document_service,
                     astrbot_context=self.context,
-                    llm_config=self.llm_config,
-                    user_prefs_handler=self.user_prefs_handler,
-                    plugin_config=self.config,
+                    plugin_config=self.plugin_config,
                 )
+                logger.info("✓ WebAPI初始化成功")
             except Exception as e:
-                logger.warning(
-                    f"知识库 WebAPI 初始化失败，可能导致无法在 WebUI 操作知识库。原因：{e}",
-                    exc_info=True,
-                )
+                failed_steps.append("web_api")
+                logger.warning(f"✗ WebAPI初始化失败: {e}")
+                logger.warning("WebAPI初始化失败，WebUI知识库管理功能将不可用")
+                self.web_api = None
 
-            logger.info("知识库插件初始化成功。")
+            # 输出初始化结果总结
+            success_count = len(initialization_steps) - len(failed_steps)
+            logger.info(f"知识库插件初始化完成: {success_count}/{len(initialization_steps)} 个组件成功初始化")
+            
+            if failed_steps:
+                logger.warning(f"以下组件初始化失败: {', '.join(failed_steps)}")
+                # 如果核心组件失败，不启动插件
+                critical_components = ["embedding_util", "user_prefs_handler", "vector_db", "kb_service", "document_service"]
+                failed_critical = [step for step in failed_steps if step in critical_components]
+                if failed_critical:
+                    logger.error(f"关键组件初始化失败: {', '.join(failed_critical)}")
+                    raise Exception(f"关键组件初始化失败: {', '.join(failed_critical)}")
 
         except Exception as e:
-            print("出现问题")
             logger.error(f"知识库插件初始化失败: {e}", exc_info=True)
-            self.vector_db = None
+            # 清理已初始化的组件
+            await self._cleanup_on_failure()
+            self.kb_service = None
+            raise
+
+    async def _cleanup_on_failure(self):
+        """初始化失败时的清理工作"""
+        try:
+            if hasattr(self, 'kb_service') and self.kb_service:
+                await self.kb_service.close()
+                logger.info("已清理知识库服务")
+        except Exception as e:
+            logger.warning(f"清理知识库服务时出错: {e}")
+        
+        try:
+            if hasattr(self, 'user_prefs_handler') and self.user_prefs_handler:
+                await self.user_prefs_handler.save_user_preferences()
+                logger.info("已保存用户偏好设置")
+        except Exception as e:
+            logger.warning(f"保存用户偏好设置时出错: {e}")
 
     async def _ensure_initialized(self) -> bool:
-        if self.init_task and not self.init_task.done():
-            await self.init_task
-        if (
-            not self.vector_db
-            or not self.embedding_util
-            or not self.text_splitter
-            or not self.user_prefs_handler
-        ):
-            logger.error("知识库插件未正确初始化，请检查日志和配置。")
+        """确保插件已正确初始化，增强容错性"""
+        try:
+            if self.init_task and not self.init_task.done():
+                await asyncio.wait_for(self.init_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error("插件初始化超时")
             return False
+        except Exception as e:
+            logger.error(f"等待插件初始化时出错: {e}")
+            return False
+            
+        # 检查核心组件是否可用
+        if not self.kb_service:
+            logger.error("知识库服务未正确初始化")
+            return False
+            
+        if not self.document_service:
+            logger.error("文档服务未正确初始化")
+            return False
+            
         return True
 
     # --- LLM Request Hook ---
@@ -234,10 +264,8 @@ class KnowledgeBasePlugin(Star):
             logger.warning("LLM 请求时知识库插件未初始化，跳过知识库增强。")
             return
 
-        clean_contexts_from_kb_content(req)
-
-        await enhance_request_with_kb(
-            event, req, self.vector_db, self.user_prefs_handler, self.config
+        await self.llm_enhancer_service.enhance_request(
+            event, req, self.user_prefs_handler
         )
 
     # --- Command Groups & Commands ---
@@ -252,70 +280,6 @@ class KnowledgeBasePlugin(Star):
             yield event.plain_result("知识库插件未初始化，请联系管理员。")
             return
         async for result in general_commands.handle_kb_help(self, event):
-            yield result
-
-    @kb_group.group("add")
-    def kb_add_group(self, event: AstrMessageEvent):
-        """添加内容到知识库的子指令组"""
-        pass
-
-    @kb_add_group.command("text")
-    async def kb_add_text(
-        self,
-        event: AstrMessageEvent,
-        content: str,
-        collection_name: Optional[str] = None,
-    ):
-        """添加文本内容到知识库。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in add_commands.handle_add_text(
-            self, event, content, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_add_group.command("file")
-    async def kb_add_file(
-        self,
-        event: AstrMessageEvent,
-        path_or_url: str,
-        collection_name: Optional[str] = None,
-    ):
-        """从本地路径或 URL 添加文件内容到知识库。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in add_commands.handle_add_file(
-            self, event, path_or_url, collection_name
-        ):
-            yield result
-
-    @kb_group.command("search", alias={"搜索", "find", "查找"})
-    async def kb_search(
-        self,
-        event: AstrMessageEvent,
-        query: str,
-        top_k_str: Optional[str] = None,
-        collection_name: Optional[str] = None,
-    ):
-        """在知识库中搜索内容。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in search_commands.handle_search(
-            self, event, query, collection_name, top_k_str
-        ):
-            yield result
-
-    @kb_group.command("list", alias={"列表", "showall"})
-    async def kb_list_collections(self, event: AstrMessageEvent):
-        """列出所有可用的知识库"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_list_collections(self, event):
             yield result
 
     @kb_group.command("current", alias={"当前"})
@@ -351,140 +315,6 @@ class KnowledgeBasePlugin(Star):
             logger.error(f"清除默认知识库时发生错误: {e}", exc_info=True)
             yield event.plain_result(f"清除默认知识库失败: {e}")
 
-    @kb_group.command("create", alias={"创建"})
-    async def kb_create_collection(self, event: AstrMessageEvent, collection_name: str):
-        """创建一个新的知识库"""
-        if VERSION >= "3.5.13":
-            yield event.plain_result("请在 WebUI 中使用知识库创建功能。")
-            return
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_create_collection(
-            self, event, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_group.command("delete", alias={"删除"})
-    async def kb_delete_collection(
-        self,
-        event: AstrMessageEvent,
-        collection_name: str,
-        confirm: Optional[str] = None,
-    ):
-        """删除一个知识库及其所有内容 (危险操作! 仅管理员)。"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-
-        if not collection_name:
-            yield event.plain_result(
-                "请输入要删除的知识库名称。用法: /kb delete <知识库名>"
-            )
-            return
-
-        if not await self.vector_db.collection_exists(collection_name):
-            yield event.plain_result(f"知识库 '{collection_name}' 不存在。")
-            return
-
-        if event.is_private_chat():
-            if confirm != "--confirm":
-                yield event.plain_result(
-                    f"⚠️ 操作确认 ⚠️\n"
-                    f"此操作将永久删除知识库 '{collection_name}' 及其包含的所有数据！此操作无法撤销！\n"
-                    f"当前处于私聊环境，指令与群聊中有所不同。\n\n"
-                    f"如果您确定要继续，请再次执行命令并添加 `--confirm` 参数:\n"
-                    f"`/kb delete {collection_name} --confirm`"
-                )
-                return
-            # 私聊中删除
-            await manage_commands.handle_delete_collection_logic(
-                self, event, collection_name
-            )
-            return
-
-        confirmation_phrase = f"确认删除{collection_name}"
-        yield event.plain_result(
-            f"警告：你确定要删除知识库 '{collection_name}' 及其所有内容吗？此操作不可恢复！\n"
-            f"请在 60 秒内回复 '{confirmation_phrase}' 来执行。"
-        )
-
-        @session_waiter(timeout=60, record_history_chains=False)
-        async def delete_confirmation_waiter(
-            controller: SessionController, confirm_event: AstrMessageEvent
-        ):
-            user_input = confirm_event.message_str.strip()
-            if user_input == confirmation_phrase:
-                # Call the handler logic
-                await manage_commands.handle_delete_collection_logic(
-                    self, confirm_event, collection_name
-                )
-                controller.stop()
-            elif user_input.lower() in ["取消", "cancel"]:
-                await confirm_event.send(
-                    confirm_event.plain_result(
-                        f"已取消删除知识库 '{collection_name}'。"
-                    )
-                )
-                controller.stop()
-            else:
-                await confirm_event.send(
-                    confirm_event.plain_result(
-                        f"输入无效。如需删除，请回复 '{confirmation_phrase}'；如需取消，请回复 '取消'。"
-                    )
-                )
-                controller.keep(timeout=60, reset_timeout=True)
-
-        try:
-            await delete_confirmation_waiter(event)
-        except TimeoutError:
-            yield event.plain_result(
-                f"删除知识库 '{collection_name}' 操作超时，已自动取消。"
-            )
-        except Exception as e_sess:
-            logger.error(f"删除知识库确认会话发生错误: {e_sess}", exc_info=True)
-            yield event.plain_result(f"删除确认过程中发生错误: {e_sess}")
-        finally:
-            event.stop_event()
-
-    @kb_group.command("count", alias={"数量"})
-    async def kb_count_documents(
-        self, event: AstrMessageEvent, collection_name: Optional[str] = None
-    ):
-        """查看指定知识库的文档数量"""
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        async for result in manage_commands.handle_count_documents(
-            self, event, collection_name
-        ):
-            yield result
-
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @kb_group.command("migrate", alias={"迁移"})
-    async def kb_faiss_migrate(self, event: AstrMessageEvent):
-        """迁移旧的 .docs 文件到新的向量数据库格式"""
-        if self.config.get("vector_db_type", "faiss") != "faiss":
-            yield event.plain_result(
-                "当前配置的向量数据库类型不是 Faiss，迁移操作仅适用于 Faiss 数据库。"
-            )
-            return
-        if not await self._ensure_initialized():
-            yield event.plain_result("知识库插件未初始化，请联系管理员。")
-            return
-        try:
-            data_path = self.persistent_data_root_path
-            await manage_commands.handle_migrate_files(self, event, data_path)
-            if self.vector_db:
-                await self.vector_db.initialize()
-            yield event.plain_result(
-                "迁移操作已完成。请使用/kb list命令以确认是否成功。"
-            )
-        except Exception as e:
-            logger.error(f"迁移过程中发生错误: {e}", exc_info=True)
-            yield event.plain_result(f"迁移失败: {e}")
-
     # --- Termination ---
     async def terminate(self):
         logger.info("知识库插件正在终止...")
@@ -498,17 +328,9 @@ class KnowledgeBasePlugin(Star):
             except Exception as e:
                 logger.error(f"等待初始化任务完成时出错: {e}")
 
-        if (
-            self.embedding_util
-            and hasattr(self.embedding_util, "close")
-            and not isinstance(self.embedding_util, Star)
-        ):
-            await self.embedding_util.close()
-            logger.info("Embedding 工具已关闭。")
-
-        if self.vector_db:
-            await self.vector_db.close()
-            logger.info("向量数据库已关闭。")
+        if self.kb_service:
+            await self.kb_service.close()
+            logger.info("知识库服务已关闭。")
 
         if self.user_prefs_handler:
             await self.user_prefs_handler.save_user_preferences()

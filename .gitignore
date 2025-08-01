@@ -171,3 +171,4 @@ cython_debug/
 .pypirc
 vector_store/vector_db_doc.md
 test_api_rerank.py
+docx/bug.md

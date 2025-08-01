@@ -19,7 +19,7 @@ from .base import (
 from astrbot.api import logger
 from astrbot.core.db.vec_db.faiss_impl import FaissVecDB
 from astrbot.core.provider.provider import EmbeddingProvider
-from ..utils.embedding import EmbeddingSolutionHelper
+from ..utils.embedding import EmbeddingUtil
 from .faiss_store import FaissStore as OldFaissStore
 
 # 定义默认的缓存大小
@@ -47,14 +47,14 @@ class AstrBotEmbeddingProviderWrapper(EmbeddingProvider):
 
     def __init__(
         self,
-        embedding_util: EmbeddingSolutionHelper,
+        embedding_util: EmbeddingUtil,
         collection_name: str,
     ):
         self.embedding_util = embedding_util
         self.collection_name = collection_name
 
     async def get_embedding(self, text: str) -> List[float]:
-        vec = await self.embedding_util.get_embedding_async(text, self.collection_name)
+        vec = await self.embedding_util.get_embedding_async(text, self.collection_name, None)
         if not vec:
             raise ValueError(
                 "获取向量失败，返回的向量为空或无效。请检查输入文本和配置。"
@@ -64,7 +64,7 @@ class AstrBotEmbeddingProviderWrapper(EmbeddingProvider):
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         """批量获取文本的嵌入"""
         vecs = await self.embedding_util.get_embeddings_async(
-            texts, self.collection_name
+            texts, self.collection_name, None
         )
         if not vecs:
             raise ValueError(
@@ -73,7 +73,7 @@ class AstrBotEmbeddingProviderWrapper(EmbeddingProvider):
         return vecs
 
     def get_dim(self) -> int:
-        return self.embedding_util.get_dimensions(self.collection_name)
+        return self.embedding_util.get_dimensions(self.collection_name, None)
 
 
 class FaissStore(VectorDBBase):
@@ -84,7 +84,7 @@ class FaissStore(VectorDBBase):
 
     def __init__(
         self,
-        embedding_util: EmbeddingSolutionHelper,
+        embedding_util: EmbeddingUtil,
         data_path: str,
         max_cache_size: int = DEFAULT_MAX_CACHE_SIZE,
         max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT_BATCHES,

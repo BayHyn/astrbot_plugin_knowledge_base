@@ -11,7 +11,7 @@ from .base import (
     MAX_RETRIES,
 )
 from astrbot.api import logger
-from ..utils.embedding import EmbeddingSolutionHelper
+from ..utils.embedding import EmbeddingUtil
 import asyncio
 
 # Faiss 是同步库，通过 asyncio.to_thread 包装其操作以适应异步环境
@@ -28,7 +28,7 @@ def _check_pickle_file(file_path: str) -> bool:
 
 
 class FaissStore(VectorDBBase):
-    def __init__(self, embedding_util: EmbeddingSolutionHelper, data_path: str):
+    def __init__(self, embedding_util: EmbeddingUtil, data_path: str):
         super().__init__(embedding_util, data_path)
         self.indexes: Dict[str, faiss.Index] = {}
         self.db: Dict[str, List[Document]] = {}  # 存储原始 Document 对象，现在命名为 db
@@ -94,7 +94,7 @@ class FaissStore(VectorDBBase):
 
         def _create_sync():
             self.indexes[collection_name] = faiss.IndexFlatL2(
-                self.embedding_util.get_dimensions(collection_name)
+                self.embedding_util.get_dimensions(collection_name, None)
             )  # L2 距离
             self.db[collection_name] = []
             self._save_collection(collection_name)
@@ -163,7 +163,7 @@ class FaissStore(VectorDBBase):
                 if current_batch_texts_to_embed:
                     batch_embeddings_generated = (
                         await self.embedding_util.get_embeddings_async(
-                            current_batch_texts_to_embed, collection_name
+                            current_batch_texts_to_embed, collection_name, None
                         )
                     )
                     logger.debug(
@@ -275,7 +275,7 @@ class FaissStore(VectorDBBase):
             return []
 
         query_embedding = await self.embedding_util.get_embedding_async(
-            query_text, collection_name
+            query_text, collection_name, None
         )
         if query_embedding is None:
             logger.error("无法为查询文本生成 embedding。")

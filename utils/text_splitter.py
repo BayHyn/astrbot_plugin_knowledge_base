@@ -1,194 +1,158 @@
-from typing import List, Callable
+from typing import List, Dict
+import asyncio
+
+# 导入semchunk分块库
+try:
+    import semchunk
+    SEMCHUNK_AVAILABLE = True
+except ImportError:
+    SEMCHUNK_AVAILABLE = False
+    raise ImportError("semchunk库是必需的，请安装: pip install semchunk")
 
 
-class RecursiveCharacterTextSplitter:
+class TextSplitterUtil:
+    """
+    异步文本分割器，使用semchunk进行语义化分块
+    
+    注意：semchunk原本是基于token进行分块的，但这里通过自定义token_counter
+    将其转换为基于字符数的分块，以保持与原有接口的一致性。
+    
+    semchunk的优势：
+    - 语义化分块：在句子、段落等语义边界分割
+    - 自动保护Markdown结构（代码块、表格、链接等）
+    - 高效的重叠处理
+    - 优化的内存使用
+    """
+
     def __init__(
         self,
         chunk_size: int,
         chunk_overlap: int,
-        length_function: Callable[[str], int],
-        is_separator_regex: bool = False,
-        separators: List[str] = None,
-    ):
-        """
-        初始化递归字符文本分割器
-
-        Args:
-            chunk_size: 每个文本块的最大大小
-            chunk_overlap: 每个文本块之间的重叠部分大小
-            length_function: 计算文本长度的函数
-            is_separator_regex: 分隔符是否为正则表达式
-            separators: 用于分割文本的分隔符列表，按优先级排序
-        """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.length_function = length_function
-        self.is_separator_regex = is_separator_regex
-
-        # 默认分隔符列表，按优先级从高到低
-        self.separators = separators or [
-            "\n\n",  # 段落
-            "\n",  # 换行
-            "。",  # 中文句子
-            "，",  # 中文逗号
-            ". ",  # 句子
-            ", ",  # 逗号分隔
-            " ",  # 单词
-            "",  # 字符
-        ]
-
-    def split_text(self, text: str, chunk_size: int = None, overlap: int = None) -> List[str]:
-        """
-        递归地将文本分割成块
-
-        Args:
-            text: 要分割的文本
-
-        Returns:
-            分割后的文本块列表
-        """
-        if not text:
-            return []
-
-        chunk_size = chunk_size or self.chunk_size
-        overlap = overlap or self.chunk_overlap
-
-        text_length = self.length_function(text)
-        if text_length <= chunk_size:
-            return [text]
-
-        for separator in self.separators:
-            if separator == "":
-                return self._split_by_character(text, chunk_size, overlap)
-
-            if separator in text:
-                splits = text.split(separator)
-                # 重新添加分隔符（除了最后一个片段）
-                splits = [s + separator for s in splits[:-1]] + [splits[-1]]
-                splits = [s for s in splits if s]
-                if len(splits) == 1:
-                    continue
-
-                # 递归合并分割后的文本块
-                final_chunks = []
-                current_chunk = []
-                current_chunk_length = 0
-
-                for split in splits:
-                    split_length = self.length_function(split)
-
-                    # 如果单个分割部分已经超过了chunk_size，需要递归分割
-                    if split_length > chunk_size:
-                        # 先处理当前积累的块
-                        if current_chunk:
-                            combined_text = "".join(current_chunk)
-                            final_chunks.extend(self.split_text(combined_text))
-                            current_chunk = []
-                            current_chunk_length = 0
-
-                        # 递归分割过大的部分
-                        final_chunks.extend(self.split_text(split))
-                    # 如果添加这部分会使当前块超过chunk_size
-                    elif current_chunk_length + split_length > chunk_size:
-                        # 合并当前块并添加到结果中
-                        combined_text = "".join(current_chunk)
-                        final_chunks.append(combined_text)
-
-                        # 处理重叠部分
-                        overlap_start = max(0, len(combined_text) - overlap)
-                        if overlap_start > 0:
-                            overlap_text = combined_text[overlap_start:]
-                            current_chunk = [overlap_text, split]
-                            current_chunk_length = (
-                                self.length_function(overlap_text) + split_length
-                            )
-                        else:
-                            current_chunk = [split]
-                            current_chunk_length = split_length
-                    else:
-                        # 添加到当前块
-                        current_chunk.append(split)
-                        current_chunk_length += split_length
-
-                # 处理剩余的块
-                if current_chunk:
-                    final_chunks.append("".join(current_chunk))
-
-                return final_chunks
-
-        return [text]
-
-    def _split_by_character(self, text: str, chunk_size: int = None, overlap: int = None) -> List[str]:
-        """
-        按字符级别分割文本
-
-        Args:
-            text: 要分割的文本
-
-        Returns:
-            分割后的文本块列表
-        """
-        chunk_size = chunk_size or self.chunk_size
-        overlap = overlap or self.chunk_overlap
-        result = []
-        for i in range(0, len(text), chunk_size - overlap):
-            end = min(i + chunk_size, len(text))
-            result.append(text[i:end])
-            if end == len(text):
-                break
-
-        return result
-
-
-class TextSplitterUtil:
-    def __init__(
-        self, chunk_size: int, chunk_overlap: int
+        use_optimized: bool = True,  # 保持兼容性参数
+        preserve_code_blocks: bool = True,  # 保持兼容性参数
+        preserve_tables: bool = True,  # 保持兼容性参数
     ):
         """
         初始化文本分割器。
         Args:
-            chunk_size: 每个块的目标大小 (字符数或 token 数，取决于分割器实现)
+            chunk_size: 每个块的目标大小 (字符数)
             chunk_overlap: 块之间的重叠大小
+            use_optimized: 兼容性参数，已弃用
+            preserve_code_blocks: 兼容性参数，已弃用
+            preserve_tables: 兼容性参数，已弃用
         """
-        # 使用 Langchain 的 RecursiveCharacterTextSplitter，它按字符分割并尝试保持段落完整性
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,  # 按字符数计算长度
-            is_separator_regex=False,
-        )
-        # logger.info(f"文本分割器初始化：chunk_size={chunk_size}, chunk_overlap={chunk_overlap}")
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
 
-    def split_text(self, text: str, chunk_size: int = None, overlap = None) -> List[str]:
+    def _character_counter(self, text: str) -> int:
+        """字符计数器，让semchunk按字符数分块而不是token数"""
+        return len(text)
+
+    def _calculate_overlap_param(self, chunk_size: int, overlap: int) -> float:
         """
-        将文本分割成块。
+        计算重叠参数
         Args:
-            text: 待分割的文本。
+            chunk_size: 块大小
+            overlap: 重叠大小
         Returns:
-            分割后的文本块列表。
+            重叠参数
+        """
+        if overlap >= 1:
+            # 绝对重叠
+            return min(overlap, chunk_size - 1)
+        else:
+            # 相对重叠
+            return min(overlap / chunk_size, 0.5) if chunk_size > 0 else 0
+
+    def _sync_split_text(self, text: str, chunk_size: int, overlap_param: float) -> List[str]:
+        """
+        在线程池中执行的同步分块方法
+        Args:
+            text: 待分割文本
+            chunk_size: 块大小
+            overlap_param: 重叠参数
+        Returns:
+            分割后的文本块列表
         """
         if not text or not text.strip():
             return []
-        return self.splitter.split_text(text, chunk_size, overlap)
+            
+        try:
+            return semchunk.chunk(
+                text=text,
+                chunk_size=chunk_size,
+                token_counter=self._character_counter,
+                memoize=True,
+                offsets=False,
+                overlap=overlap_param if overlap_param > 0 else None,
+                cache_maxsize=1000  # 限制缓存大小
+            )
+        except Exception as e:
+            raise ValueError(f"semchunk分块失败: {e}")
 
+    async def split_text(
+        self, text: str, chunk_size: int = None, overlap: int = None
+    ) -> List[str]:
+        """
+        异步文本分割
+        Args:
+            text: 待分割的文本
+            chunk_size: 覆盖默认的块大小
+            overlap: 覆盖默认的重叠大小
+        Returns:
+            分割后的文本块列表
+        """
+        if not text or not text.strip():
+            return []
 
-# 基于 tiktoken 的分割器
-# class TokenTextSplitter:
-#     def __init__(self, chunk_size: int, chunk_overlap: int, model_name: str = "text-embedding-ada-002"):
-#         self.chunk_size = chunk_size
-#         self.chunk_overlap = chunk_overlap
-#         try:
-#             self.encoding = get_encoding(model_name)
-#         except: # Fallback for models not directly supported by tiktoken's default list
-#             self.encoding = get_encoding("cl100k_base")
+        # 使用提供的参数或默认参数
+        actual_chunk_size = chunk_size or self.chunk_size
+        actual_overlap = overlap or self.chunk_overlap
+        
+        # 计算重叠比例
+        overlap_param = self._calculate_overlap_param(actual_chunk_size, actual_overlap)
 
+        try:
+            # 在执行器中运行semchunk，避免阻塞事件循环
+            loop = asyncio.get_event_loop()
+            chunks = await loop.run_in_executor(
+                None,
+                self._sync_split_text,
+                text,
+                actual_chunk_size,
+                overlap_param
+            )
+            return chunks
 
-#     def split_text(self, text: str) -> List[str]:
-#         if not text or not text.strip():
-#             return []
-#         tokens = self.encoding.encode(text)
-#         chunks = []
-#         for i in range(0, len(tokens), self.chunk_size - self.chunk_overlap):
-#             chunk_tokens = tokens[i:i + self.chunk_size]
-#             chunks.append(self.encoding.decode(chunk_tokens))
-#         return chunks
+        except Exception as e:
+            raise ValueError(f"semchunk分块失败: {e}")
+
+    async def get_chunk_metadata(self, text: str) -> List[Dict]:
+        """获取文本块的详细元数据"""
+        chunks = await self.split_text(text)
+
+        metadata_list = []
+        for i, chunk in enumerate(chunks):
+            metadata_dict = {
+                "chunk_index": i,
+                "chunk_size": len(chunk),
+                "chunk_text": chunk[:50] + "..." if len(chunk) > 50 else chunk,
+                "word_count": len(chunk.split()),
+                "char_count": len(chunk),
+            }
+            metadata_list.append(metadata_dict)
+
+        return metadata_list
+
+    def get_splitter_info(self) -> Dict[str, any]:
+        """获取分割器的配置信息"""
+        return {
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+            "splitter_type": "semchunk",
+            "supports_markdown": True,
+            "supports_code_blocks": True,
+            "supports_tables": True,
+            "supports_async": True,
+            "memory_optimized": True,
+        }
