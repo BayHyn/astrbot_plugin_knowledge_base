@@ -2,3 +2,4 @@ numpy
 faiss-cpu
 markitdown-no-magika[pptx,docx,xlsx,xls,pdf]
 jieba
+semchunk
