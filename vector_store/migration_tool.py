@@ -92,7 +92,7 @@ class MigrationTool:
             logger.error(f"创建备份失败: {e}")
             return False
 
-    def migrate_collection(
+    async def migrate_collection(
         self, collection_name: str, embedding_util: Any, force: bool = False
     ) -> bool:
         """迁移单个集合"""
@@ -111,7 +111,7 @@ class MigrationTool:
             logger.info(f"检测到旧格式类型: {old_format_type}")
 
             # 加载旧数据
-            old_documents = self._load_old_format(
+            old_documents = await self._load_old_format(
                 collection_name, old_format_type, embedding_util
             )
             if not old_documents:
@@ -122,9 +122,7 @@ class MigrationTool:
             new_store = EnhancedFaissStore(embedding_util, str(self.data_path))
 
             # 迁移数据
-            asyncio.run(
-                self._migrate_documents(new_store, collection_name, old_documents)
-            )
+            await self._migrate_documents(new_store, collection_name, old_documents)
 
             # 验证迁移
             if self._validate_migration(collection_name, len(old_documents)):
@@ -163,7 +161,7 @@ class MigrationTool:
 
         return "unknown"
 
-    def _load_old_format(
+    async def _load_old_format(
         self, collection_name: str, format_type: str, embedding_util: Any
     ) -> List[Document]:
         """加载旧格式数据"""
@@ -173,7 +171,7 @@ class MigrationTool:
             if format_type == "faiss_store":
                 # 加载旧的FaissStore格式
                 old_store = OldFaissStore(embedding_util, str(self.data_path))
-                asyncio.run(old_store.initialize())
+                await old_store.initialize()
 
                 # 获取文档
                 docs = old_store.db.get(collection_name, [])
@@ -310,7 +308,7 @@ class MigrationTool:
             logger.error(f"回滚失败: {e}")
             return False
 
-    def migrate_all(self, embedding_util: Any, force: bool = False) -> Dict[str, bool]:
+    async def migrate_all(self, embedding_util: Any, force: bool = False) -> Dict[str, bool]:
         """迁移所有旧格式集合"""
         old_collections = self.detect_old_format()
         results = {}
@@ -319,7 +317,7 @@ class MigrationTool:
 
         for collection_name in old_collections:
             logger.info(f"开始迁移集合: {collection_name}")
-            success = self.migrate_collection(collection_name, embedding_util, force)
+            success = await self.migrate_collection(collection_name, embedding_util, force)
             results[collection_name] = success
 
             if success:
