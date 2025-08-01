@@ -127,46 +127,120 @@ class FileParser:
         self.async_client = None
         self.sync_client = None
         self.model_name = None
-        self._setup_llm_clients()
+        # 延迟初始化，等到实际需要使用时再设置LLM客户端
+        self.md_converter = None
+        self._llm_setup_attempted = False
 
-    def _setup_llm_clients(self):
+    async def _setup_llm_clients(self):
+        """异步设置LLM客户端"""
+        if self._llm_setup_attempted:
+            return  # 避免重复设置
+        
+        self._llm_setup_attempted = True
+        
         if not self.llm_settings.enable_llm_parser:
             logger.info("FileParser: LLM解析功能已禁用。")
             self.llm_enabled = False
+            self._setup_markitdown()
             return
 
+        provider_config = None
         provider_id = self.llm_settings.provider
-        if not provider_id:
-            logger.warning(
-                "FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。"
-            )
-            provider_config = self.context.get_using_provider()
-        else:
-            provider_config = self.context.get_provider(provider_id)
 
-        if provider_config:
+        if not provider_id:
+            logger.info("FileParser: 未指定LLM提供商ID，将尝试使用AstrBot的默认提供商。")
+            provider_config = self.context.get_using_provider()
+            if not provider_config:
+                logger.warning("FileParser: 当前没有正在使用的LLM提供商。")
+        else:
+            logger.info(f"FileParser: 尝试使用指定的LLM提供商ID: {provider_id}")
+            provider_config = self.context.get_provider_by_id(provider_id)
+            if not provider_config:
+                logger.warning(f"FileParser: 未找到ID为 '{provider_id}' 的LLM提供商。")
+
+        if not provider_config:
+            # 如果没有找到指定提供商，列出所有可用的提供商供参考
+            all_providers = self.context.get_all_providers()
+            if all_providers:
+                provider_ids = [p.provider_id for p in all_providers]
+                logger.info(f"FileParser: 可用的LLM提供商ID列表: {provider_ids}")
+            else:
+                logger.warning("FileParser: 系统中没有配置任何LLM提供商。")
+            
+            logger.warning("FileParser: 无法获取LLM提供商配置，基于LLM的解析将被禁用。")
+            self.llm_enabled = False
+            self._setup_markitdown()
+            return
+
+        try:
+            # 获取提供商配置信息
             api_key = provider_config.get_current_key()
             api_url = provider_config.provider_config.get("api_base")
-            self.model_name = provider_config.get_model()
+            
+            # 获取模型信息：异步调用get_models()
+            try:
+                available_models = await provider_config.get_models()
+                if available_models:
+                    # 使用配置中指定的模型，或者使用第一个可用模型
+                    self.model_name = provider_config.provider_config.get("model")
+                    if not self.model_name or self.model_name not in available_models:
+                        self.model_name = available_models[0]
+                        logger.info(f"FileParser: 使用默认模型: {self.model_name}")
+                else:
+                    logger.warning("FileParser: 提供商没有可用的模型列表。")
+                    self.model_name = provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                    logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
+            except Exception as e:
+                logger.warning(f"FileParser: 异步获取模型列表失败: {e}")
+                self.model_name = provider_config.provider_config.get("model", "gpt-3.5-turbo")
+                logger.info(f"FileParser: 使用配置中的模型: {self.model_name}")
+            
+            if not api_key:
+                logger.warning("FileParser: LLM提供商API密钥为空。")
+            if not api_url:
+                logger.warning("FileParser: LLM提供商API地址为空。")
+            if not self.model_name:
+                logger.warning("FileParser: LLM提供商模型名称为空。")
+            
             if api_key and api_url and self.model_name:
                 self.async_client = AsyncOpenAI(api_key=api_key, base_url=api_url)
                 self.sync_client = OpenAI(api_key=api_key, base_url=api_url)
                 self.llm_enabled = True
                 logger.info(
-                    f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name})。"
+                    f"FileParser: LLM客户端配置成功 (Provider: {provider_config.provider_id}, Model: {self.model_name}, API: {api_url})。"
                 )
             else:
-                logger.warning(
-                    "FileParser: LLM提供商配置不完整。基于LLM的解析将被禁用。"
-                )
-        else:
-            logger.warning("FileParser: 未找到指定的LLM提供商。基于LLM的解析将被禁用。")
+                logger.warning("FileParser: LLM提供商配置不完整，基于LLM的解析将被禁用。")
+                self.llm_enabled = False
+                
+        except Exception as e:
+            logger.error(f"FileParser: 获取LLM提供商配置时出错: {e}，基于LLM的解析将被禁用。", exc_info=True)
+            self.llm_enabled = False
 
-        self.md_converter = MarkItDown(
-            enable_plugins=self.llm_enabled,
-            llm_client=self.async_client,
-            llm_model=self.model_name,
-        )
+        self._setup_markitdown()
+
+    def _setup_markitdown(self):
+        """设置MarkItDown转换器"""
+        try:
+            if self.llm_enabled:
+                self.md_converter = MarkItDown(
+                    enable_plugins=True,
+                    llm_client=self.async_client,
+                    llm_model=self.model_name,
+                )
+                logger.info("FileParser: MarkItDown初始化成功，启用LLM插件。")
+            else:
+                self.md_converter = MarkItDown(enable_plugins=False)
+                logger.info("FileParser: MarkItDown初始化成功，禁用LLM插件。")
+        except Exception as e:
+            logger.error(f"FileParser: MarkItDown初始化失败: {e}，将影响复杂文件解析功能。", exc_info=True)
+            # 即使MarkItDown初始化失败，也要创建一个基础实例
+            try:
+                self.md_converter = MarkItDown(enable_plugins=False)
+                logger.info("FileParser: 使用基础MarkItDown配置。")
+            except Exception as e2:
+                logger.error(f"FileParser: 基础MarkItDown初始化也失败: {e2}")
+                self.md_converter = None
 
     async def _parse_text(self, file_path: str) -> Optional[str]:
         try:
@@ -177,6 +251,11 @@ class FileParser:
 
     async def _parse_markdown(self, file_path: str) -> Optional[str]:
         try:
+            if not self.md_converter:
+                logger.warning(f"MarkItDown未正确初始化，无法解析文件: {file_path}")
+                # 尝试作为普通文本读取
+                return await _detect_and_read_file(file_path)
+                
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None, lambda: self.md_converter.convert(file_path)
@@ -184,7 +263,13 @@ class FileParser:
             return result.text_content
         except Exception as e:
             logger.error(f"MarkItDown转换失败: {file_path}: {e}")
-            return None
+            # 回退到普通文本读取
+            try:
+                logger.info(f"尝试作为普通文本读取文件: {file_path}")
+                return await _detect_and_read_file(file_path)
+            except Exception as e2:
+                logger.error(f"作为普通文本读取也失败: {file_path}: {e2}")
+                return None
 
     async def _parse_image(self, file_path: str) -> Optional[str]:
         if not self.llm_enabled:
@@ -265,6 +350,10 @@ class FileParser:
         Returns:
             文件文本内容，如果解析失败则返回 None。
         """
+        # 确保LLM客户端已经设置
+        if not self._llm_setup_attempted:
+            await self._setup_llm_clients()
+            
         try:
             _, extension = os.path.splitext(file_path)
             extension = extension.lower()
