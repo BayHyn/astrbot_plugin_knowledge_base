@@ -81,7 +81,7 @@ class PluginSettings(BaseModel):
                 "以下是可能相关的知识库内容：\n---\n{retrieved_contexts}\n---\n请根据以上信息回答我的问题。",
             ),
             llm_parser=LLMSettings(
-                enable_llm_parser=get_config_value("LLM_model", True),
+                enable_llm_parser=get_config_value("enable_llm_parser", True),
                 provider=get_config_value("llm_parser_provider"),
             ),
             rerank=RerankSettings(
