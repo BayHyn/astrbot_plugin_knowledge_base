@@ -252,11 +252,36 @@ class SQLiteMetadataStore:
     def get_documents_by_vector_ids(
         self, vector_ids: List[int], filters: Optional[Filter] = None
     ) -> List[EnhancedDocument]:
-        """根据向量ID列表获取文档，可选地应用过滤器"""
+        """根据向量ID列表获取文档，可选地应用过滤器
+        优化版本：使用分批处理和限制查询大小
+        """
         if not vector_ids:
             logger.debug("vector_ids为空，返回空列表")
             return []
 
+        # 限制单次查询的最大ID数量，防止SQL查询过大
+        MAX_IDS_PER_QUERY = 500
+        
+        if len(vector_ids) > MAX_IDS_PER_QUERY:
+            logger.info(f"大量向量ID查询（{len(vector_ids)}个），使用分批处理")
+            
+            # 分批处理
+            all_documents = []
+            for i in range(0, len(vector_ids), MAX_IDS_PER_QUERY):
+                batch_ids = vector_ids[i:i + MAX_IDS_PER_QUERY]
+                logger.debug(f"处理批次 {i//MAX_IDS_PER_QUERY + 1}: {len(batch_ids)}个ID")
+                batch_docs = self._get_documents_by_vector_ids_batch(batch_ids, filters)
+                all_documents.extend(batch_docs)
+            
+            logger.info(f"分批查询完成，获取到 {len(all_documents)} 个文档")
+            return all_documents
+        else:
+            return self._get_documents_by_vector_ids_batch(vector_ids, filters)
+
+    def _get_documents_by_vector_ids_batch(
+        self, vector_ids: List[int], filters: Optional[Filter] = None
+    ) -> List[EnhancedDocument]:
+        """单批次获取文档（内部方法）"""
         logger.debug(f"查询向量ID: {vector_ids[:10]}... (共{len(vector_ids)}个)")
 
         placeholders = ",".join("?" * len(vector_ids))
@@ -269,6 +294,9 @@ class SQLiteMetadataStore:
                 base_query += f" AND {filter_clause}"
                 params.extend(filter_params)
 
+        # 添加ORDER BY以保证结果的一致性
+        base_query += " ORDER BY vector_id"
+
         logger.debug(f"执行SQL查询: {base_query}")
         logger.debug(f"参数: {params[:10]}... (共{len(params)}个)")
 
@@ -278,46 +306,10 @@ class SQLiteMetadataStore:
 
             logger.debug(f"SQL查询返回 {len(rows)} 行数据")
 
-            # TODO: 添加数据库一致性检查
-            # 如果没有匹配的文档，检查数据库中实际存储的vector_id范围
+            # 针对大量数据的优化日志
             if len(rows) == 0 and len(vector_ids) > 0:
                 logger.warning("没有找到匹配的文档，检查数据库中的vector_id范围...")
-                try:
-                    cursor = conn.execute(
-                        "SELECT MIN(vector_id), MAX(vector_id), COUNT(*) FROM documents"
-                    )
-                    result = cursor.fetchone()
-                    if result and result[0] is not None:
-                        min_id, max_id, count = result
-                        logger.warning(
-                            f"数据库中vector_id范围: {min_id}-{max_id}, 总数: {count}"
-                        )
-                        logger.warning(
-                            f"查询的vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
-                        )
-
-                        # 检查是否有任何匹配
-                        sample_ids = vector_ids[:5]  # 检查前5个ID
-                        for vid in sample_ids:
-                            cursor = conn.execute(
-                                "SELECT COUNT(*) FROM documents WHERE vector_id = ?",
-                                (vid,),
-                            )
-                            exists = cursor.fetchone()[0]
-                            logger.debug(f"vector_id {vid} 存在: {exists > 0}")
-
-                        # 如果数据库中的vector_id都是负数或者从0开始，而查询的是从其他数字开始
-                        # 这可能表明数据不一致，需要修复
-                        if max_id < min(vector_ids):
-                            logger.error(
-                                f"数据不一致：数据库vector_id最大值({max_id}) < 查询最小值({min(vector_ids)})"
-                            )
-                            logger.error("可能需要重建索引或修复数据")
-                    else:
-                        logger.warning("数据库中没有任何文档记录")
-
-                except Exception as e:
-                    logger.error(f"检查数据库状态时出错: {e}")
+                self._log_database_consistency_info(conn, vector_ids)
 
             documents = []
             for row in rows:
@@ -337,6 +329,43 @@ class SQLiteMetadataStore:
                 documents.append(doc)
 
             return documents
+
+    def _log_database_consistency_info(self, conn, vector_ids: List[int]):
+        """记录数据库一致性信息（简化版）"""
+        try:
+            cursor = conn.execute(
+                "SELECT MIN(vector_id), MAX(vector_id), COUNT(*) FROM documents"
+            )
+            result = cursor.fetchone()
+            if result and result[0] is not None:
+                min_id, max_id, count = result
+                logger.warning(
+                    f"数据库中vector_id范围: {min_id}-{max_id}, 总数: {count}"
+                )
+                logger.warning(
+                    f"查询的vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
+                )
+
+                # 只检查前5个ID，减少数据库查询
+                sample_ids = vector_ids[:5]
+                for vid in sample_ids:
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) FROM documents WHERE vector_id = ?",
+                        (vid,),
+                    )
+                    exists = cursor.fetchone()[0]
+                    logger.debug(f"vector_id {vid} 存在: {exists > 0}")
+
+                if max_id < min(vector_ids):
+                    logger.error(
+                        f"数据不一致：数据库vector_id最大值({max_id}) < 查询最小值({min(vector_ids)})"
+                    )
+                    logger.error("可能需要重建索引或修复数据")
+            else:
+                logger.warning("数据库中没有任何文档记录")
+
+        except Exception as e:
+            logger.error(f"检查数据库状态时出错: {e}")
 
     def _build_filter_clause(self, filters: Filter) -> Tuple[str, List[Any]]:
         """构建SQL过滤子句"""
@@ -870,9 +899,16 @@ class EnhancedFaissStore(VectorDBBase):
                 logger.info(f"集合 '{collection_name}' 的索引为空，没有可搜索的向量")
                 return []
 
+            # 优化的向量搜索：限制初始搜索结果数量
             logger.debug("开始执行向量搜索...")
+            # 限制最大搜索结果数，防止过大的vector_ids列表
+            max_search_results = min(top_k * 3, 1000)  # 最多1000个结果
+            
             distances, indices = self.index_store.search_vectors(
-                query_vector, top_k * 2
+                query_vector, max_search_results
+            )
+            logger.debug(
+                f"向量搜索完成，搜索结果数: {len(indices[0])}"
             )
             logger.debug(
                 f"向量搜索完成，distances: {distances[0][: min(5, len(distances[0]))]}"
@@ -881,12 +917,14 @@ class EnhancedFaissStore(VectorDBBase):
                 f"向量搜索完成，indices: {indices[0][: min(10, len(indices[0]))]}..."
             )
 
-            # 获取文档 - 修复数据类型问题
-            vector_ids = [
-                int(idx) for idx in indices[0] if idx != -1
-            ]  # 转换为Python int
-            logger.debug(f"有效向量ID: {vector_ids[:10]}...")  # 只显示前10个
-            logger.info(f"找到 {len(vector_ids)} 个有效向量ID")
+            # 获取文档 - 优化数据类型处理
+            vector_ids = []
+            for idx in indices[0]:
+                if idx != -1:  # 过滤无效索引
+                    vector_ids.append(int(idx))  # 转换为Python int
+                    
+            logger.debug(f"有效向量ID数量: {len(vector_ids)}")
+            logger.debug(f"有效向量ID示例: {vector_ids[:5]}...")  # 只显示前5个
 
             if not vector_ids:
                 logger.warning("没有找到有效的向量ID")
@@ -1136,7 +1174,7 @@ class EnhancedFaissStore(VectorDBBase):
     async def _validate_data_consistency(
         self, collection_name: str, expected_docs: int
     ):
-        """验证数据一致性：确保FAISS索引和数据库同步"""
+        """验证数据一致性：确保FAISS索引和数据库同步（优化版）"""
         try:
             # 获取索引中的向量数量
             index_count = self.index_store.count_vectors()
@@ -1153,34 +1191,54 @@ class EnhancedFaissStore(VectorDBBase):
                 logger.error(f"数据不一致！索引和数据库数量不匹配")
                 logger.error(f"  索引: {index_count}, 数据库: {db_count}")
 
-                # 检查具体的vector_id范围
-                with self.get_metadata_store_for_collection(collection_name) as store:
-                    all_docs = store.get_all_documents()
-                    if all_docs:
-                        vector_ids = [vid for _, vid in all_docs]
-                        logger.info(
-                            f"  数据库vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
-                        )
-                        logger.info(f"  数据库vector_id总数: {len(set(vector_ids))}")
-
-                        # 检查是否有缺失的ID
-                        expected_range = set(range(index_count))
-                        actual_range = set(vector_ids)
-                        missing_ids = expected_range - actual_range
-                        extra_ids = actual_range - expected_range
-
-                        if missing_ids:
-                            logger.error(
-                                f"  缺失的vector_id: {sorted(list(missing_ids))[:10]}..."
-                            )
-                        if extra_ids:
-                            logger.error(
-                                f"  多余的vector_id: {sorted(list(extra_ids))[:10]}..."
-                            )
-                    else:
-                        logger.error("  数据库中没有文档记录")
+                # 优化：只在数据不一致时才进行详细检查
+                await self._detailed_consistency_check(collection_name, index_count)
             else:
                 logger.info("✅ 数据一致性检查通过")
 
         except Exception as e:
             logger.error(f"数据一致性验证失败: {e}")
+
+    async def _detailed_consistency_check(self, collection_name: str, index_count: int):
+        """详细的一致性检查（仅在数据不一致时调用）"""
+        try:
+            with self.get_metadata_store_for_collection(collection_name) as store:
+                all_docs = store.get_all_documents()
+                if all_docs:
+                    vector_ids = [vid for _, vid in all_docs]
+                    
+                    # 优化：使用集合操作减少内存占用
+                    vector_ids_set = set(vector_ids)
+                    
+                    logger.info(
+                        f"  数据库vector_id范围: {min(vector_ids)}-{max(vector_ids)}"
+                    )
+                    logger.info(f"  数据库vector_id总数: {len(vector_ids_set)}")
+
+                    # 优化：只检查缺失和多余的ID数量，不显示具体ID
+                    expected_range = set(range(index_count))
+                    missing_ids = expected_range - vector_ids_set
+                    extra_ids = vector_ids_set - expected_range
+
+                    if missing_ids:
+                        logger.error(f"  缺失的vector_id数量: {len(missing_ids)}")
+                        # 只显示前5个作为示例
+                        if len(missing_ids) <= 10:
+                            logger.error(f"  缺失ID: {sorted(list(missing_ids))}")
+                        else:
+                            sample_missing = sorted(list(missing_ids))[:5]
+                            logger.error(f"  缺失ID示例: {sample_missing}...")
+                            
+                    if extra_ids:
+                        logger.error(f"  多余的vector_id数量: {len(extra_ids)}")
+                        # 只显示前5个作为示例
+                        if len(extra_ids) <= 10:
+                            logger.error(f"  多余ID: {sorted(list(extra_ids))}")
+                        else:
+                            sample_extra = sorted(list(extra_ids))[:5]
+                            logger.error(f"  多余ID示例: {sample_extra}...")
+                else:
+                    logger.error("  数据库中没有文档记录")
+                    
+        except Exception as e:
+            logger.error(f"详细一致性检查失败: {e}")
