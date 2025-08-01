@@ -321,7 +321,7 @@ class KnowledgeBaseWebAPI:
 
             # 文本分割
             try:
-                chunks = self.text_splitter.split_text(
+                chunks = await self.text_splitter.split_text(
                     text=content, chunk_size=chunk_size, overlap=overlap
                 )
                 if not chunks:

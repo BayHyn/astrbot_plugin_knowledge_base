@@ -46,7 +46,7 @@ class DocumentService:
         await self.kb_service.ensure_collection_exists(collection_name, event)
 
         logger.info("开始分割文本")
-        chunks = self.text_splitter.split_text(content)
+        chunks = await self.text_splitter.split_text(content)
         if not chunks:
             logger.warning(f"文本分割后无有效内容，发送者: {event.get_sender_name()}")
             yield event.plain_result("文本分割后无有效内容。")
@@ -162,7 +162,7 @@ class DocumentService:
 
                 # 文本分割
                 logger.info("开始分割文本")
-                chunks = self.text_splitter.split_text(content)
+                chunks = await self.text_splitter.split_text(content)
                 if not chunks:
                     logger.warning("文本分割后无有效内容")
                     yield event.plain_result("文本分割后无有效内容。")

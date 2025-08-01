@@ -148,6 +148,9 @@ class KnowledgeBasePlugin(Star):
                 from .utils.text_splitter import TextSplitterUtil
 
                 file_parser = FileParser(self.context, self.plugin_config.llm_parser)
+                # 异步设置LLM客户端
+                await file_parser._setup_llm_clients()
+                
                 text_splitter = TextSplitterUtil(
                     chunk_size=self.plugin_config.text_chunk_size,
                     chunk_overlap=self.plugin_config.text_chunk_overlap
