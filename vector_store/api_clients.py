@@ -6,14 +6,13 @@ API重排序客户端实现
 import asyncio
 import aiohttp
 import json
-import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
 import time
 from dataclasses import dataclass
 import hashlib
 from functools import lru_cache
-
+from astrbot.api import logger
 from .base import Document
 
 
@@ -90,7 +89,7 @@ class BaseAPIClient(ABC):
                         return await response.json()
                     else:
                         error_text = await response.text()
-                        logging.warning(
+                        logger.warning(
                             f"API请求失败 (状态码: {response.status}): {error_text}"
                         )
 
@@ -108,7 +107,7 @@ class BaseAPIClient(ABC):
                     raise Exception("API请求超时")
             except Exception as e:
                 if attempt < self.config.max_retries:
-                    logging.warning(
+                    logger.warning(
                         f"API请求异常，重试 {attempt + 1}/{self.config.max_retries}: {e}"
                     )
                     await asyncio.sleep(2**attempt)
@@ -189,7 +188,7 @@ class CohereClient(BaseAPIClient):
             )
 
         except Exception as e:
-            logging.error(f"Cohere重排序失败: {e}")
+            logger.error(f"Cohere重排序失败: {e}")
             return RerankResponse(results=[], provider="cohere", error=str(e))
 
 
@@ -254,7 +253,7 @@ class JinaClient(BaseAPIClient):
             return RerankResponse(results=reranked_docs, provider="jina", cached=False)
 
         except Exception as e:
-            logging.error(f"Jina重排序失败: {e}")
+            logger.error(f"Jina重排序失败: {e}")
             return RerankResponse(results=[], provider="jina", error=str(e))
 
 
@@ -321,7 +320,7 @@ class OpenAIClient(BaseAPIClient):
             )
 
         except Exception as e:
-            logging.error(f"OpenAI兼容重排序失败: {e}")
+            logger.error(f"OpenAI兼容重排序失败: {e}")
             return RerankResponse(results=[], provider="openai", error=str(e))
 
 
@@ -368,7 +367,7 @@ class CustomAPIClient(BaseAPIClient):
             )
 
         except Exception as e:
-            logging.error(f"自定义API重排序失败: {e}")
+            logger.error(f"自定义API重排序失败: {e}")
             return RerankResponse(results=[], provider="custom", error=str(e))
 
 

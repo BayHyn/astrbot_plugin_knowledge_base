@@ -6,7 +6,6 @@
 import os
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
-import logging
 
 from .base import VectorDBBase, Document, DocumentMetadata, Filter, SearchResult
 from .enhanced_faiss_store import EnhancedFaissStore
@@ -15,7 +14,7 @@ from .rerank_service import EnhancedHybridReranker
 from .api_rerank_config import APIRerankConfig
 from .migration_tool import MigrationTool
 from ..utils.embedding import EmbeddingUtil
-
+from astrbot.api import logger
 
 class EnhancedVectorStore(VectorDBBase):
     """
@@ -45,7 +44,7 @@ class EnhancedVectorStore(VectorDBBase):
 
     async def initialize(self):
         """初始化存储"""
-        logging.info("初始化增强型向量存储...")
+        logger.info("初始化增强型向量存储...")
 
         # 初始化重排序器
         await self.reranker.initialize()
@@ -54,18 +53,18 @@ class EnhancedVectorStore(VectorDBBase):
         if self.auto_migrate:
             old_collections = self.migration_tool.detect_old_format()
             if old_collections:
-                logging.info(
+                logger.info(
                     f"检测到 {len(old_collections)} 个旧格式集合，开始自动迁移"
                 )
                 results = self.migration_tool.migrate_all(self.embedding_util)
 
                 for collection, success in results.items():
                     if success:
-                        logging.info(f"集合 {collection} 迁移成功")
+                        logger.info(f"集合 {collection} 迁移成功")
                     else:
-                        logging.error(f"集合 {collection} 迁移失败")
+                        logger.error(f"集合 {collection} 迁移失败")
 
-        logging.info("增强型向量存储初始化完成")
+        logger.info("增强型向量存储初始化完成")
 
     async def create_collection(self, collection_name: str):
         """创建集合（总是使用新格式）"""
@@ -131,7 +130,7 @@ class EnhancedVectorStore(VectorDBBase):
             return reranked_results
 
         except Exception as e:
-            logging.error(f"混合搜索失败: {e}")
+            logger.error(f"混合搜索失败: {e}")
             # 回退到基础搜索
             return await self.enhanced_store.search(
                 collection_name, query_text, top_k, filters
@@ -161,7 +160,7 @@ class EnhancedVectorStore(VectorDBBase):
             return []
 
         except Exception as e:
-            logging.error(f"关键词搜索失败: {e}")
+            logger.error(f"关键词搜索失败: {e}")
             return []
 
     def _merge_results(

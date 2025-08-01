@@ -4,11 +4,10 @@ API重排序服务实现
 """
 
 import asyncio
-import logging
 from typing import List, Tuple, Optional, Dict, Any
 import time
 from functools import lru_cache
-
+from astrbot.api import logger
 from .base import Document
 from .api_rerank_config import APIRerankConfig
 from .api_clients import APIClientFactory, RerankRequest, RerankResponse
@@ -29,11 +28,11 @@ class APIRerankService:
             return
 
         if not self.config.validate():
-            logging.warning("API重排序配置无效，将使用降级策略")
+            logger.warning("API重排序配置无效，将使用降级策略")
             return
 
         self._initialized = True
-        logging.info(f"API重排序服务已初始化，提供商: {self.config.provider}")
+        logger.info(f"API重排序服务已初始化，提供商: {self.config.provider}")
 
     def _get_cache_key(
         self, query: str, documents: List[Tuple[Document, float]], top_k: int
@@ -62,7 +61,7 @@ class APIRerankService:
     def _get_cached_result(self, key: str) -> Optional[List[Tuple[Document, float]]]:
         """获取缓存结果"""
         if self._is_cache_valid(key):
-            logging.debug(f"使用缓存结果: {key}")
+            logger.debug(f"使用缓存结果: {key}")
             return self._cache[key]
         return None
 
@@ -126,7 +125,7 @@ class APIRerankService:
                 response = await client.rerank(request)
 
             if response.error:
-                logging.warning(f"API重排序失败: {response.error}")
+                logger.warning(f"API重排序失败: {response.error}")
                 if self.config.fallback_strategy == "simple":
                     return await self._fallback_rerank(query, documents, top_k)
                 elif self.config.fallback_strategy == "exception":
@@ -139,7 +138,7 @@ class APIRerankService:
             return response.results[:top_k]
 
         except Exception as e:
-            logging.error(f"API重排序异常: {e}")
+            logger.error(f"API重排序异常: {e}")
             if self.config.fallback_strategy == "simple":
                 return await self._fallback_rerank(query, documents, top_k)
             elif self.config.fallback_strategy == "exception":
@@ -151,7 +150,7 @@ class APIRerankService:
         self, query: str, documents: List[Tuple[Document, float]], top_k: int
     ) -> List[Tuple[Document, float]]:
         """降级到简单重排序"""
-        logging.info("使用简单重排序作为降级策略")
+        logger.info("使用简单重排序作为降级策略")
 
         # 简单重排序：基于原始分数和关键词匹配
         reranked = []
@@ -188,7 +187,7 @@ class APIRerankService:
         """清空缓存"""
         self._cache.clear()
         self._cache_timestamps.clear()
-        logging.info("API重排序缓存已清空")
+        logger.info("API重排序缓存已清空")
 
     def get_cache_stats(self) -> Dict[str, int]:
         """获取缓存统计"""
@@ -215,7 +214,7 @@ class APIRerankManager:
         """初始化所有服务"""
         for name, service in self.services.items():
             await service.initialize()
-            logging.info(f"初始化重排序服务: {name}")
+            logger.info(f"初始化重排序服务: {name}")
 
     def get_service(self, name: str) -> Optional[APIRerankService]:
         """获取重排序服务"""
@@ -229,4 +228,4 @@ class APIRerankManager:
         """移除重排序服务"""
         if name in self.services:
             del self.services[name]
-            logging.info(f"移除重排序服务: {name}")
+            logger.info(f"移除重排序服务: {name}")

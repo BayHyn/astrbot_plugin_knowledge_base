@@ -9,7 +9,6 @@ import sqlite3
 import json
 import pickle
 import asyncio
-import logging
 import numpy as np
 import faiss
 from typing import List, Dict, Any, Optional, Tuple, Set

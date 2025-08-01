@@ -7,7 +7,7 @@ import asyncio
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 from dataclasses import dataclass
-import logging
+from astrbot.api import logger
 
 from .base import Document, SearchResult
 from .api_rerank_config import APIRerankConfig

@@ -11,7 +11,7 @@ import shutil
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-import logging
+from astrbot.api import logger
 from datetime import datetime
 
 from .base import Document
@@ -85,11 +85,11 @@ class MigrationTool:
                     f"{datetime.now().isoformat()} - 备份集合 {collection_name} 到 {backup_dir}\n"
                 )
 
-            logging.info(f"成功创建备份: {backup_dir}")
+            logger.info(f"成功创建备份: {backup_dir}")
             return True
 
         except Exception as e:
-            logging.error(f"创建备份失败: {e}")
+            logger.error(f"创建备份失败: {e}")
             return False
 
     def migrate_collection(
@@ -99,7 +99,7 @@ class MigrationTool:
         try:
             # 检查是否需要迁移
             if not force and collection_name not in self.detect_old_format():
-                logging.info(f"集合 {collection_name} 无需迁移")
+                logger.info(f"集合 {collection_name} 无需迁移")
                 return True
 
             # 创建备份
@@ -108,14 +108,14 @@ class MigrationTool:
 
             # 确定旧格式类型
             old_format_type = self._determine_old_format_type(collection_name)
-            logging.info(f"检测到旧格式类型: {old_format_type}")
+            logger.info(f"检测到旧格式类型: {old_format_type}")
 
             # 加载旧数据
             old_documents = self._load_old_format(
                 collection_name, old_format_type, embedding_util
             )
             if not old_documents:
-                logging.warning(f"集合 {collection_name} 没有可迁移的数据")
+                logger.warning(f"集合 {collection_name} 没有可迁移的数据")
                 return True
 
             # 创建新的存储
@@ -130,7 +130,7 @@ class MigrationTool:
             if self._validate_migration(collection_name, len(old_documents)):
                 # 标记迁移完成
                 self._mark_migration_complete(collection_name)
-                logging.info(f"集合 {collection_name} 迁移成功")
+                logger.info(f"集合 {collection_name} 迁移成功")
                 return True
             else:
                 # 回滚
@@ -138,7 +138,7 @@ class MigrationTool:
                 return False
 
         except Exception as e:
-            logging.error(f"迁移集合 {collection_name} 失败: {e}")
+            logger.error(f"迁移集合 {collection_name} 失败: {e}")
             self.rollback(collection_name)
             return False
 
@@ -212,7 +212,7 @@ class MigrationTool:
                 asyncio.run(old_store.close())
 
         except Exception as e:
-            logging.error(f"加载旧格式数据失败: {e}")
+            logger.error(f"加载旧格式数据失败: {e}")
 
         return documents
 
@@ -231,7 +231,7 @@ class MigrationTool:
             batch = documents[i : i + batch_size]
             await new_store.add_documents(collection_name, batch)
 
-            logging.info(
+            logger.info(
                 f"已迁移 {min(i + batch_size, total_docs)}/{total_docs} 个文档"
             )
 
@@ -243,7 +243,7 @@ class MigrationTool:
             new_faiss = self.data_path / f"{collection_name}.faiss"
 
             if not (new_db.exists() and new_faiss.exists()):
-                logging.error("新格式文件未创建")
+                logger.error("新格式文件未创建")
                 return False
 
             # 检查文档数量
@@ -251,7 +251,7 @@ class MigrationTool:
             actual_count = asyncio.run(new_store.count_documents(collection_name))
 
             if actual_count != expected_count:
-                logging.error(
+                logger.error(
                     f"文档数量不匹配: 期望 {expected_count}, 实际 {actual_count}"
                 )
                 return False
@@ -262,7 +262,7 @@ class MigrationTool:
             return True
 
         except Exception as e:
-            logging.error(f"验证失败: {e}")
+            logger.error(f"验证失败: {e}")
             return False
 
     def _mark_migration_complete(self, collection_name: str):
@@ -282,7 +282,7 @@ class MigrationTool:
             ]
 
             if not backup_dirs:
-                logging.warning(f"未找到集合 {collection_name} 的备份")
+                logger.warning(f"未找到集合 {collection_name} 的备份")
                 return False
 
             latest_backup = max(backup_dirs, key=lambda x: x.stat().st_mtime)
@@ -303,11 +303,11 @@ class MigrationTool:
             for backup_file in latest_backup.iterdir():
                 shutil.copy2(backup_file, self.data_path / backup_file.name)
 
-            logging.info(f"成功回滚集合 {collection_name}")
+            logger.info(f"成功回滚集合 {collection_name}")
             return True
 
         except Exception as e:
-            logging.error(f"回滚失败: {e}")
+            logger.error(f"回滚失败: {e}")
             return False
 
     def migrate_all(self, embedding_util: Any, force: bool = False) -> Dict[str, bool]:
@@ -315,17 +315,17 @@ class MigrationTool:
         old_collections = self.detect_old_format()
         results = {}
 
-        logging.info(f"检测到 {len(old_collections)} 个需要迁移的集合")
+        logger.info(f"检测到 {len(old_collections)} 个需要迁移的集合")
 
         for collection_name in old_collections:
-            logging.info(f"开始迁移集合: {collection_name}")
+            logger.info(f"开始迁移集合: {collection_name}")
             success = self.migrate_collection(collection_name, embedding_util, force)
             results[collection_name] = success
 
             if success:
-                logging.info(f"集合 {collection_name} 迁移成功")
+                logger.info(f"集合 {collection_name} 迁移成功")
             else:
-                logging.error(f"集合 {collection_name} 迁移失败")
+                logger.error(f"集合 {collection_name} 迁移失败")
 
         return results
 
@@ -357,7 +357,7 @@ class MigrationTool:
             # 检查迁移标记
             marker_file = self.data_path / f"{collection_name}.migrated"
             if not marker_file.exists():
-                logging.warning(f"集合 {collection_name} 未标记为已迁移")
+                logger.warning(f"集合 {collection_name} 未标记为已迁移")
                 return False
 
             # 删除旧格式文件
@@ -371,7 +371,7 @@ class MigrationTool:
                 file_path = self.data_path / filename
                 if file_path.exists():
                     file_path.unlink()
-                    logging.info(f"删除旧文件: {filename}")
+                    logger.info(f"删除旧文件: {filename}")
 
             # 删除迁移标记
             marker_file.unlink()
@@ -379,7 +379,7 @@ class MigrationTool:
             return True
 
         except Exception as e:
-            logging.error(f"清理旧文件失败: {e}")
+            logger.error(f"清理旧文件失败: {e}")
             return False
 
 
