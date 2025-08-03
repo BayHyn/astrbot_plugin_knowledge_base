@@ -172,3 +172,4 @@ cython_debug/
 vector_store/vector_db_doc.md
 test_api_rerank.py
 docx/bug.md
+CLAUDE.md

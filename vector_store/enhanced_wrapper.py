@@ -5,6 +5,7 @@
 
 import os
 import asyncio
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 from .base import VectorDBBase, Document, DocumentMetadata, Filter, SearchResult
@@ -28,19 +29,52 @@ class EnhancedVectorStore(VectorDBBase):
         data_path: str,
         rerank_config: Optional[Dict[str, Any]] = None,
         user_prefs_handler=None,
+        max_collections_in_memory: int = 3,
+        enable_memory_monitoring: bool = True,
+        config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(embedding_util, data_path)
 
+        # 从配置中读取参数
+        memory_config = config.get("memory_optimization", {}) if config else {}
+        performance_config = config.get("performance_tuning", {}) if config else {}
+        
+        # 应用配置值，命令行参数优先
+        max_collections_in_memory = memory_config.get("max_collections_in_memory", max_collections_in_memory)
+        enable_memory_monitoring = memory_config.get("enable_memory_monitoring", enable_memory_monitoring)
+        memory_threshold_mb = memory_config.get("memory_threshold_mb", 1024)
+        auto_evict_on_memory_pressure = memory_config.get("auto_evict_on_memory_pressure", True)
+        
         # 初始化组件
         self.enhanced_store = EnhancedFaissStore(
-            embedding_util, data_path, user_prefs_handler=user_prefs_handler
+            embedding_util, 
+            data_path, 
+            user_prefs_handler=user_prefs_handler,
+            max_collections_in_memory=max_collections_in_memory
         )
         self.migration_tool = MigrationTool(data_path)
         self.reranker = EnhancedHybridReranker(rerank_config)
 
         # 配置
         self.auto_migrate = True
-        self.use_enhanced_search = True
+        self.use_enhanced_search = performance_config.get("enable_hybrid_search", True)
+        self.enable_memory_monitoring = enable_memory_monitoring
+        self.memory_threshold_mb = memory_threshold_mb
+        self.auto_evict_on_memory_pressure = auto_evict_on_memory_pressure
+        
+        # 内存监控（如果启用）
+        self.memory_monitor = None
+        if enable_memory_monitoring:
+            try:
+                import psutil
+                self.memory_monitor = MemoryMonitor(
+                    max_memory_mb=memory_threshold_mb,
+                    check_interval=60
+                )
+                logger.info("内存监控已启用")
+            except ImportError:
+                logger.warning("psutil未安装，内存监控已禁用")
+                self.enable_memory_monitoring = False
 
     async def initialize(self):
         """初始化存储"""
@@ -88,6 +122,13 @@ class EnhancedVectorStore(VectorDBBase):
         filters: Optional[Filter] = None,
     ) -> List[SearchResult]:
         """搜索文档（支持混合搜索和重排序）"""
+        # 内存压力检查
+        if self.enable_memory_monitoring and self.memory_monitor and self.auto_evict_on_memory_pressure:
+            if self.memory_monitor.should_evict_cache():
+                logger.info("检测到内存压力，触发缓存清理")
+                # 触发enhanced_store的缓存清理
+                await self.enhanced_store.collection_cache._evict_lru()
+        
         if not self.use_enhanced_search:
             # 回退到基础搜索
             return await self.enhanced_store.search(
@@ -104,25 +145,36 @@ class EnhancedVectorStore(VectorDBBase):
         top_k: int = 5,
         filters: Optional[Filter] = None,
     ) -> List[SearchResult]:
-        """混合搜索：向量 + 关键词 + 重排序"""
+        """优化的混合搜索：并发执行向量搜索和关键词搜索"""
         try:
-            # 1. 向量搜索
-            vector_results = await self.enhanced_store.search(
-                collection_name, query_text, top_k * 3, filters
+            # 并发执行向量搜索和关键词搜索
+            vector_task = asyncio.create_task(
+                self.enhanced_store.search(collection_name, query_text, top_k * 2, filters)
             )
+            keyword_task = asyncio.create_task(
+                self._keyword_search(collection_name, query_text, top_k * 2)
+            )
+            
+            # 等待两个搜索完成
+            vector_results, keyword_results = await asyncio.gather(
+                vector_task, keyword_task, return_exceptions=True
+            )
+            
+            # 处理可能的异常
+            if isinstance(vector_results, Exception):
+                logger.error(f"向量搜索失败: {vector_results}")
+                vector_results = []
+            if isinstance(keyword_results, Exception):
+                logger.error(f"关键词搜索失败: {keyword_results}")
+                keyword_results = []
 
-            if not vector_results:
+            if not vector_results and not keyword_results:
                 return []
 
-            # 2. 关键词搜索 (注意：关键词搜索可能也需要支持过滤)
-            keyword_results = await self._keyword_search(
-                collection_name, query_text, top_k * 3
-            )
-
-            # 3. 合并结果
+            # 合并结果
             merged_results = self._merge_results(vector_results, keyword_results)
 
-            # 4. 重排序
+            # 重排序
             reranked_results = await self.reranker.rerank(
                 query_text, merged_results, top_k=top_k
             )
@@ -131,7 +183,7 @@ class EnhancedVectorStore(VectorDBBase):
 
         except Exception as e:
             logger.error(f"混合搜索失败: {e}")
-            # 回退到基础搜索
+            # 回退到基础向量搜索
             return await self.enhanced_store.search(
                 collection_name, query_text, top_k, filters
             )
@@ -139,39 +191,28 @@ class EnhancedVectorStore(VectorDBBase):
     async def _keyword_search(
         self, collection_name: str, query_text: str, limit: int = 100
     ) -> List[Tuple[Document, float]]:
-        """关键词搜索"""
+        """优化的关键词搜索 - 直接从SQLite获取文档"""
         try:
             # 使用关键词索引进行搜索
-            keyword_index = KeywordIndex(
-                str(self.data_path / f"{collection_name}.enhanced.db")
-            )
+            db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+            keyword_index = KeywordIndex(db_path)
 
-            # 执行BM25搜索
+            # 执行BM25搜索获取doc_id列表
             keyword_results = keyword_index.search_with_bm25(query_text, limit)
 
-            # 转换为Document格式并获取完整文档
+            # 高效批量获取文档 - 直接从SQLite查询而非向量搜索
             documents = []
-            for doc_id, score in keyword_results:
-                try:
-                    # 从增强存储获取完整文档
-                    search_results = await self.enhanced_store.search(
-                        collection_name, "", top_k=1000  # 获取大量结果用于ID匹配
-                    )
-                    
-                    # 找到匹配的文档
-                    for result in search_results:
-                        if isinstance(result, tuple):
-                            doc, _ = result
-                        else:
-                            doc = result.document
-                        
-                        if doc.id == doc_id:
-                            documents.append((doc, score))
-                            break
-                            
-                except Exception as e:
-                    logger.debug(f"获取文档 {doc_id} 失败: {e}")
-                    continue
+            if keyword_results:
+                # 使用enhanced_store的元数据存储直接获取文档
+                with self.enhanced_store.get_metadata_store_for_collection(collection_name) as store:
+                    for doc_id, score in keyword_results:
+                        try:
+                            doc = store.get_document(doc_id)
+                            if doc:
+                                documents.append((doc, score))
+                        except Exception as e:
+                            logger.debug(f"获取文档 {doc_id} 失败: {e}")
+                            continue
 
             logger.debug(f"关键词搜索 '{query_text}' 返回 {len(documents)} 个结果")
             return documents
@@ -273,7 +314,7 @@ class EnhancedVectorStore(VectorDBBase):
 
     def get_storage_info(self) -> Dict[str, Any]:
         """获取存储信息"""
-        return {
+        info = {
             "type": "enhanced_faiss",
             "features": [
                 "faiss_vector_index",
@@ -281,9 +322,25 @@ class EnhancedVectorStore(VectorDBBase):
                 "keyword_index",
                 "rerank_support",
                 "migration_support",
+                "lru_cache",
             ],
             "format": {"metadata": ".enhanced.db", "vectors": ".faiss"},
+            "cache_stats": self.enhanced_store.get_cache_stats(),
         }
+        
+        # 添加内存监控信息
+        if self.enable_memory_monitoring and self.memory_monitor:
+            memory_info = self.memory_monitor.get_memory_usage()
+            info["memory_monitoring"] = {
+                "enabled": True,
+                "memory_usage": memory_info,
+                "threshold_mb": self.memory_threshold_mb,
+                "auto_evict_enabled": self.auto_evict_on_memory_pressure,
+            }
+        else:
+            info["memory_monitoring"] = {"enabled": False}
+            
+        return info
 
     def get_migration_status(self) -> Dict[str, Any]:
         """获取迁移状态"""
@@ -300,7 +357,10 @@ class EnhancedVectorStore(VectorDBBase):
 
 # 工厂函数
 def create_enhanced_store(
-    embedding_util: EmbeddingUtil, data_path: str, use_enhanced: bool = True
+    embedding_util: EmbeddingUtil, 
+    data_path: str, 
+    use_enhanced: bool = True,
+    config: Optional[Dict[str, Any]] = None
 ) -> VectorDBBase:
     """
     创建增强型存储实例
@@ -309,16 +369,16 @@ def create_enhanced_store(
         embedding_util: 嵌入工具
         data_path: 数据路径
         use_enhanced: 是否使用增强功能
+        config: 完整配置字典（包含memory_optimization等）
 
     Returns:
         VectorDBBase: 向量存储实例
     """
     if use_enhanced:
-        return EnhancedVectorStore(embedding_util, data_path)
+        return EnhancedVectorStore(embedding_util, data_path, config=config)
     else:
         # 回退到旧格式
         from .faiss_store import FaissStore
-
         return FaissStore(embedding_util, data_path)
 
 
@@ -373,3 +433,105 @@ class EnhancedStoreConfig:
             config.migration_config.update(config_dict["migration_config"])
 
         return config
+
+
+class MemoryMonitor:
+    """内存使用监控器"""
+    
+    def __init__(self, max_memory_mb: int = 1024, check_interval: int = 60):
+        try:
+            import psutil
+            self.psutil = psutil
+            self.max_memory_mb = max_memory_mb
+            self.check_interval = check_interval
+            self.last_check = 0
+            self.available = True
+        except ImportError:
+            self.available = False
+            logger.warning("psutil未安装，内存监控不可用")
+            
+    def get_memory_usage(self) -> Dict[str, float]:
+        """获取当前内存使用情况"""
+        if not self.available:
+            return {"available": False}
+            
+        try:
+            process = self.psutil.Process()
+            memory_info = process.memory_info()
+            return {
+                "available": True,
+                "rss_mb": memory_info.rss / 1024 / 1024,
+                "vms_mb": memory_info.vms / 1024 / 1024,
+                "percent": process.memory_percent(),
+                "system_available_mb": self.psutil.virtual_memory().available / 1024 / 1024
+            }
+        except Exception as e:
+            logger.error(f"获取内存使用情况失败: {e}")
+            return {"available": False, "error": str(e)}
+            
+    def should_evict_cache(self) -> bool:
+        """检查是否应该驱逐缓存"""
+        if not self.available:
+            return False
+            
+        current_time = time.time()
+        if current_time - self.last_check < self.check_interval:
+            return False
+            
+        self.last_check = current_time
+        memory_info = self.get_memory_usage()
+        
+        if memory_info.get("available"):
+            return memory_info.get("rss_mb", 0) > self.max_memory_mb
+        return False
+        
+    def log_memory_stats(self):
+        """记录内存统计信息"""
+        if not self.available:
+            return
+            
+        memory_info = self.get_memory_usage()
+        if memory_info.get("available"):
+            logger.info(
+                f"内存使用: RSS={memory_info['rss_mb']:.1f}MB, "
+                f"VMS={memory_info['vms_mb']:.1f}MB, "
+                f"进程占用={memory_info['percent']:.1f}%, "
+                f"系统可用={memory_info['system_available_mb']:.1f}MB"
+            )
+
+
+# 工厂函数增强
+def create_enhanced_store(
+    embedding_util: EmbeddingUtil, 
+    data_path: str, 
+    use_enhanced: bool = True,
+    max_collections_in_memory: int = 3,
+    enable_memory_monitoring: bool = True,
+    config: Optional[Dict[str, Any]] = None
+) -> VectorDBBase:
+    """
+    创建增强型存储实例
+
+    Args:
+        embedding_util: 嵌入工具
+        data_path: 数据路径
+        use_enhanced: 是否使用增强功能
+        max_collections_in_memory: 内存中最大集合数
+        enable_memory_monitoring: 是否启用内存监控
+        config: 完整配置字典（优先级高于直接参数）
+
+    Returns:
+        VectorDBBase: 向量存储实例
+    """
+    if use_enhanced:
+        return EnhancedVectorStore(
+            embedding_util, 
+            data_path,
+            max_collections_in_memory=max_collections_in_memory,
+            enable_memory_monitoring=enable_memory_monitoring,
+            config=config
+        )
+    else:
+        # 回退到旧格式
+        from .faiss_store import FaissStore
+        return FaissStore(embedding_util, data_path)
