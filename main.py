@@ -41,6 +41,7 @@ class KnowledgeBasePlugin(Star):
         self.document_service: Optional[DocumentService] = None
         self.llm_enhancer_service: Optional[LLMEnhancerService] = None
         self.user_prefs_handler: Optional[UserPrefsHandler] = None
+        self.storage_api_service: Optional['StorageAPIService'] = None
 
         # Initialize plugin config
         self.plugin_config = PluginSettings.from_astrbot_config(config)
@@ -71,6 +72,7 @@ class KnowledgeBasePlugin(Star):
             "kb_service",
             "document_service", 
             "llm_enhancer_service",
+            "storage_api_service",
             "web_api"
         ]
         
@@ -183,7 +185,24 @@ class KnowledgeBasePlugin(Star):
                 logger.warning("LLM增强服务初始化失败，RAG功能将不可用")
                 self.llm_enhancer_service = None
 
-            # 7. 初始化Web API
+            # 7. 初始化存储API服务
+            try:
+                from .services.storage_api_service import StorageAPIService
+                self.storage_api_service = StorageAPIService(
+                    vector_db=vector_db,
+                    kb_service=self.kb_service,
+                    text_splitter=text_splitter,
+                    file_parser=file_parser,
+                    settings=self.plugin_config,
+                )
+                logger.info("✓ 存储API服务初始化成功")
+            except Exception as e:
+                failed_steps.append("storage_api_service")
+                logger.warning(f"✗ 存储API服务初始化失败: {e}")
+                logger.warning("存储API服务初始化失败，底层存储接口将不可用")
+                self.storage_api_service = None
+
+            # 8. 初始化Web API
             try:
                 self.web_api = KnowledgeBaseWebAPI(
                     kb_service=self.kb_service,
@@ -314,6 +333,20 @@ class KnowledgeBasePlugin(Star):
         except Exception as e:
             logger.error(f"清除默认知识库时发生错误: {e}", exc_info=True)
             yield event.plain_result(f"清除默认知识库失败: {e}")
+
+    # --- Storage API Service ---
+    async def get_storage_api(self):
+        """
+        获取存储API服务实例
+        
+        Returns:
+            StorageAPIService实例或None
+        """
+        if not await self._ensure_initialized():
+            logger.error("插件未正确初始化，无法获取存储API服务")
+            return None
+        
+        return self.storage_api_service
 
     # --- Termination ---
     async def terminate(self):
