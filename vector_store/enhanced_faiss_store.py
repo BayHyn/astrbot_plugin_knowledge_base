@@ -12,7 +12,7 @@ import asyncio
 import numpy as np
 import faiss
 from typing import List, Dict, Any, Optional, Tuple, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 import threading
 import time
@@ -151,9 +151,36 @@ class SQLiteMetadataStore:
             self._local.connection.row_factory = sqlite3.Row
         yield self._local.connection
 
+    def _normalize_metadata(self, metadata: Any) -> Dict[str, Any]:
+        """将传入的元数据统一转换为可JSON序列化的dict"""
+        if metadata is None:
+            return {}
+        # DocumentMetadata(dataclass) -> dict
+        if isinstance(metadata, DocumentMetadata):
+            try:
+                data = asdict(metadata)
+            except Exception:
+                # 兜底：尽量取属性
+                data = {
+                    "source": getattr(metadata, "source", None),
+                    "created_at": getattr(metadata, "created_at", None),
+                    "updated_at": getattr(metadata, "updated_at", None),
+                    "custom_fields": getattr(metadata, "custom_fields", {}) or {},
+                }
+            return data
+        # dict -> dict
+        if isinstance(metadata, dict):
+            return metadata
+        # 其他类型：尝试转dict或字符串
+        try:
+            return dict(metadata)  # type: ignore
+        except Exception:
+            return {"value": str(metadata)}
+
     def add_document(self, doc: EnhancedDocument, vector_id: int) -> int:
         """添加文档到数据库"""
         with self._get_connection() as conn:
+            metadata_dict = self._normalize_metadata(doc.metadata)
             cursor = conn.execute(
                 """
                 INSERT OR REPLACE INTO documents 
@@ -165,7 +192,7 @@ class SQLiteMetadataStore:
                     doc.id,
                     doc.text_content,
                     pickle.dumps(doc.embedding) if doc.embedding else None,
-                    json.dumps(doc.metadata),
+                    json.dumps(metadata_dict),
                     json.dumps(doc.keywords),
                     doc.doc_hash,
                     doc.created_at,
@@ -192,12 +219,12 @@ class SQLiteMetadataStore:
             cursor = conn.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
             row = cursor.fetchone()
             if row:
+                # metadata 存储为JSON字符串，读取为dict
+                md = json.loads(row["metadata"]) if row["metadata"] else {}
                 return EnhancedDocument(
                     text_content=row["text_content"],
-                    embedding=pickle.loads(row["embedding"])
-                    if row["embedding"]
-                    else None,
-                    metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                    embedding=pickle.loads(row["embedding"]) if row["embedding"] else None,
+                    metadata=md,
                     id=row["doc_id"],
                     keywords=json.loads(row["keywords"]) if row["keywords"] else [],
                     doc_hash=row["doc_hash"],
@@ -313,12 +340,11 @@ class SQLiteMetadataStore:
 
             documents = []
             for row in rows:
+                md = json.loads(row["metadata"]) if row["metadata"] else {}
                 doc = EnhancedDocument(
                     text_content=row["text_content"],
-                    embedding=pickle.loads(row["embedding"])
-                    if row["embedding"]
-                    else None,
-                    metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+                    embedding=pickle.loads(row["embedding"]) if row["embedding"] else None,
+                    metadata=md,
                     id=row["doc_id"],
                     keywords=json.loads(row["keywords"]) if row["keywords"] else [],
                     doc_hash=row["doc_hash"],
@@ -376,55 +402,130 @@ class SQLiteMetadataStore:
         params = []
 
         for condition in filters.conditions:
-            # 简化处理，假设所有字段都在metadata JSON字段中
-            # 实际应用中可能需要更复杂的逻辑来处理不同类型的字段
-            if condition.key.startswith("metadata."):
-                json_key = condition.key.split(".", 1)[1]
-                if condition.operator == "=":
+            key = condition.key
+            op = condition.operator
+            val = condition.value
+
+            # 支持 metadata.custom_fields.* 的过滤
+            if key.startswith("custom_fields."):
+                json_key = f"custom_fields.{key.split('.', 1)[1]}"
+                key = f"metadata.{json_key}"
+
+            if key.startswith("metadata."):
+                json_key = key.split(".", 1)[1]
+                if op == "=":
                     clauses.append(f"json_extract(metadata, '$.{json_key}') = ?")
-                    params.append(condition.value)
-                elif condition.operator == "!=":
+                    params.append(val)
+                elif op == "!=":
                     clauses.append(f"json_extract(metadata, '$.{json_key}') != ?")
-                    params.append(condition.value)
-                elif condition.operator == "in":
-                    if isinstance(condition.value, (list, tuple)):
-                        in_placeholders = ",".join("?" * len(condition.value))
-                        clauses.append(
-                            f"json_extract(metadata, '$.{json_key}') IN ({in_placeholders})"
-                        )
-                        params.extend(condition.value)
-                # 可以添加更多操作符...
+                    params.append(val)
+                elif op == "in" and isinstance(val, (list, tuple)):
+                    in_placeholders = ",".join("?" * len(val))
+                    clauses.append(
+                        f"json_extract(metadata, '$.{json_key}') IN ({in_placeholders})"
+                    )
+                    params.extend(val)
+                # 可扩展更多操作符
 
-            # 处理直接字段（如 created_at）
-            elif condition.key in ["created_at", "updated_at"]:
-                if condition.operator in ["=", "!=", ">", "<", ">=", "<="]:
-                    clauses.append(f"{condition.key} {condition.operator} ?")
-                    params.append(condition.value)
+            elif key in ["created_at", "updated_at"]:
+                if op in ["=", "!=", ">", "<", ">=", "<="]:
+                    clauses.append(f"{key} {op} ?")
+                    params.append(val)
 
-            # 处理 source 字段
-            elif condition.key == "source":
-                # 假设source存储在metadata的'source'字段中
-                if condition.operator == "=":
+            elif key == "source":
+                if op == "=":
                     clauses.append("json_extract(metadata, '$.source') = ?")
-                    params.append(condition.value)
-                elif condition.operator == "!=":
+                    params.append(val)
+                elif op == "!=":
                     clauses.append("json_extract(metadata, '$.source') != ?")
-                    params.append(condition.value)
-                elif condition.operator == "in":
-                    if isinstance(condition.value, (list, tuple)):
-                        in_placeholders = ",".join("?" * len(condition.value))
-                        clauses.append(
-                            f"json_extract(metadata, '$.source') IN ({in_placeholders})"
-                        )
-                        params.extend(condition.value)
-
-            # 可以添加对其他字段的处理...
+                    params.append(val)
+                elif op == "in" and isinstance(val, (list, tuple)):
+                    in_placeholders = ",".join("?" * len(val))
+                    clauses.append(
+                        f"json_extract(metadata, '$.source') IN ({in_placeholders})"
+                    )
+                    params.extend(val)
 
         if not clauses:
             return "", []
 
         logic_op = " AND " if filters.logic.lower() == "and" else " OR "
         return logic_op.join(clauses), params
+
+    # 新增：获取当前最大vector_id
+    def get_max_vector_id(self) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT MAX(vector_id) AS max_vid FROM documents")
+            row = cursor.fetchone()
+            return int(row["max_vid"]) if row and row["max_vid"] is not None else -1
+
+    # 新增：通过doc_id获取vector_id
+    def get_vector_id_by_doc_id(self, doc_id: str) -> Optional[int]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT vector_id FROM documents WHERE doc_id = ?", (doc_id,)
+            )
+            row = cursor.fetchone()
+            return int(row["vector_id"]) if row else None
+
+    # 新增：分页获取文档基本信息
+    def get_documents_page(self, offset: int, limit: int) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT doc_id, metadata, created_at, updated_at, text_content, vector_id
+                FROM documents
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+            rows = cursor.fetchall()
+            docs: List[Dict[str, Any]] = []
+            for row in rows:
+                md = json.loads(row["metadata"]) if row["metadata"] else {}
+                text = row["text_content"] or ""
+                docs.append(
+                    {
+                        "id": row["doc_id"],
+                        "vector_id": row["vector_id"],
+                        "metadata": md,
+                        "source": md.get("source"),
+                        "chunk_index": md.get("chunk_index"),
+                        "created_at": row["created_at"],
+                        "updated_at": row["updated_at"],
+                        "preview": (text[:100] + ("..." if len(text) > 100 else "")),
+                    }
+                )
+            return docs
+
+    # 新增：按批次迭代取出向量用于重建索引
+    def iter_embeddings(self, batch_size: int = 1000):
+        with self._get_connection() as conn:
+            offset = 0
+            while True:
+                cursor = conn.execute(
+                    """
+                    SELECT vector_id, embedding
+                    FROM documents
+                    WHERE embedding IS NOT NULL
+                    ORDER BY vector_id
+                    LIMIT ? OFFSET ?
+                    """,
+                    (batch_size, offset),
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    break
+                batch = []
+                for row in rows:
+                    emb = pickle.loads(row["embedding"]) if row["embedding"] else None
+                    if emb is not None:
+                        batch.append((int(row["vector_id"]), emb))
+                yield batch
+                if len(rows) < batch_size:
+                    break
+                offset += batch_size
 
     def close(self):
         """关闭数据库连接"""
@@ -483,46 +584,11 @@ class FAISSIndexStore:
         logger.debug(f"创建新的FAISS索引，维度: {self.dimension}")
 
         try:
-            # TODO: 实现智能索引类型选择策略
-            # 对于小数据集，使用简单的FlatL2索引避免训练点不足的问题
-            # IVF索引需要大量训练数据，通常需要聚类数的至少39倍的训练点
-
-            # 暂时禁用复杂索引类型，使用最稳定的FlatL2索引
-            # 这样可以避免训练点不足的问题
-            use_simple_index = True  # TODO: 未来根据数据量动态决定
-
-            if use_simple_index:
-                # 使用基础L2索引，不需要训练
-                logger.info("使用基础FlatL2索引（适合小到中等规模数据集）")
-                self.index = faiss.IndexFlatL2(self.dimension)
-                self.is_trained = True
-            elif self.config.use_compression:
-                # 使用Product Quantization压缩
-                # 需要足够的训练数据：至少 nlist * 39 个向量
-                logger.info("使用IVF+PQ压缩索引")
-                quantizer = faiss.IndexFlatL2(self.dimension)
-                self.index = faiss.IndexIVFPQ(
-                    quantizer,
-                    self.dimension,
-                    self.config.nlist,
-                    self.config.compression_bits,
-                    8,
-                )
-                self.is_trained = False
-            elif self.config.use_ivf:
-                # 使用IVF索引
-                # 需要足够的训练数据：至少 nlist * 39 个向量
-                logger.info("使用IVF索引")
-                quantizer = faiss.IndexFlatL2(self.dimension)
-                self.index = faiss.IndexIVFFlat(
-                    quantizer, self.dimension, self.config.nlist
-                )
-                self.is_trained = False
-            else:
-                # 使用基础L2索引
-                logger.info("使用基础FlatL2索引")
-                self.index = faiss.IndexFlatL2(self.dimension)
-                self.is_trained = True
+            # 暂时优先使用IDMap2包装的FlatL2，支持按ID删除/更新
+            logger.info("使用IndexIDMap2(FlatL2)索引（支持按ID增删改）")
+            inner = faiss.IndexFlatL2(self.dimension)
+            self.index = faiss.IndexIDMap2(inner)
+            self.is_trained = True
 
             logger.debug(
                 f"索引创建成功，类型: {type(self.index).__name__}, 是否已训练: {self.is_trained}"
@@ -560,50 +626,11 @@ class FAISSIndexStore:
             logger.info(f"成功保存FAISS索引: {self.index_path}")
 
     def add_vectors(self, vectors: np.ndarray) -> int:
-        """添加向量到索引"""
+        """添加向量到索引（不带ID）"""
         if self.index is None:
             raise ValueError("索引未初始化")
 
-        # TODO: 实现更智能的训练策略和错误恢复机制
-        if not self.is_trained and (self.config.use_compression or self.config.use_ivf):
-            # 检查是否有足够的训练数据
-            n_vectors = vectors.shape[0]
-            min_required = self.config.nlist * 39  # FAISS建议的最小训练数据量
-
-            if n_vectors < min_required:
-                logger.warning(
-                    f"训练数据不足：当前 {n_vectors} 个向量，需要至少 {min_required} 个"
-                )
-                logger.info("降级到基础FlatL2索引以避免训练错误")
-
-                # 重新创建为简单索引
-                try:
-                    self.index = faiss.IndexFlatL2(self.dimension)
-                    self.is_trained = True
-                    logger.info("成功降级到FlatL2索引")
-                except Exception as e:
-                    logger.error(f"降级索引失败: {e}")
-                    raise ValueError(f"无法创建替代索引: {e}")
-            else:
-                # 有足够的训练数据，进行训练
-                try:
-                    logger.info(f"开始训练索引，训练数据: {n_vectors} 个向量")
-                    self.index.train(vectors)
-                    self.is_trained = True
-                    logger.info("索引训练完成")
-                except Exception as e:
-                    logger.error(f"索引训练失败: {e}")
-                    # 训练失败，降级到简单索引
-                    logger.info("训练失败，降级到基础FlatL2索引")
-                    try:
-                        self.index = faiss.IndexFlatL2(self.dimension)
-                        self.is_trained = True
-                        logger.info("成功降级到FlatL2索引")
-                    except Exception as fallback_e:
-                        logger.error(f"降级索引失败: {fallback_e}")
-                        raise ValueError(f"索引训练和降级都失败: {fallback_e}")
-
-        start_id = self.index.ntotal
+        start_id = getattr(self.index, "ntotal", 0)
         try:
             self.index.add(vectors)
             logger.debug(f"成功添加 {vectors.shape[0]} 个向量，起始ID: {start_id}")
@@ -613,6 +640,26 @@ class FAISSIndexStore:
 
         return start_id
 
+    # 新增：带ID添加/删除能力
+    def supports_id_map(self) -> bool:
+        return hasattr(self.index, "add_with_ids") and hasattr(self.index, "remove_ids")
+
+    def add_with_ids(self, vectors: np.ndarray, ids: np.ndarray):
+        if not self.supports_id_map():
+            raise ValueError("当前索引不支持带ID添加，请重建索引为IndexIDMap2")
+        # 确保类型为int64
+        ids64 = ids.astype(np.int64)
+        self.index.add_with_ids(vectors, ids64)
+
+    def remove_ids(self, ids: np.ndarray) -> int:
+        if not self.supports_id_map():
+            logger.warning("当前索引不支持按ID删除，建议重建索引")
+            return 0
+        ids64 = ids.astype(np.int64)
+        # faiss python 绑定允许直接传入ndarray
+        removed = int(self.index.remove_ids(ids64))
+        return removed
+
     def search_vectors(
         self, query_vectors: np.ndarray, k: int = 5
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -620,7 +667,7 @@ class FAISSIndexStore:
         if self.index is None:
             raise ValueError("索引未初始化")
 
-        if self.index.ntotal == 0:
+        if getattr(self.index, "ntotal", 0) == 0:
             return np.array([[]]), np.array([[]])
 
         distances, indices = self.index.search(query_vectors, min(k, self.index.ntotal))
@@ -628,7 +675,7 @@ class FAISSIndexStore:
 
     def count_vectors(self) -> int:
         """统计向量数量"""
-        return self.index.ntotal if self.index else 0
+        return getattr(self.index, "ntotal", 0) if self.index else 0
 
     def close(self):
         """关闭索引"""
@@ -817,20 +864,35 @@ class EnhancedFaissStore(VectorDBBase):
                     logger.error(f"重新初始化索引失败: {e}")
                     raise ValueError(f"索引初始化失败，无法添加向量: {e}")
 
-            start_id = self.index_store.add_vectors(vectors)
-            logger.info(f"向量添加成功，起始ID: {start_id}, 添加数量: {len(vectors)}")
-
-            # 添加到SQLite - 修复ID映射问题
             doc_ids = []
-            for i, doc in enumerate(valid_docs):
-                vector_id = start_id + i
-                doc.id = f"{collection_name}_{vector_id}"
-                doc.vector_id = vector_id
-                self.metadata_store.add_document(doc, vector_id)
-                doc_ids.append(doc.id)
+            if self.index_store.supports_id_map():
+                # 使用自定义ID，保证与SQLite的vector_id一致
+                start_id = self.metadata_store.get_max_vector_id() + 1
+                new_ids = np.array([start_id + i for i in range(len(vectors))], dtype=np.int64)
+                self.index_store.add_with_ids(vectors, new_ids)
+                logger.info(
+                    f"向量添加成功（IDMap2），起始ID: {start_id}, 添加数量: {len(vectors)}"
+                )
+                # 写入SQLite，保持ID一致
+                for i, doc in enumerate(valid_docs):
+                    vector_id = int(new_ids[i])
+                    doc.id = f"{collection_name}_{vector_id}"
+                    doc.vector_id = vector_id
+                    self.metadata_store.add_document(doc, vector_id)
+                    doc_ids.append(doc.id)
+            else:
+                # 兼容旧索引（不支持ID删除），沿用原顺序ID
+                start_id = self.index_store.add_vectors(vectors)
+                logger.info(f"向量添加成功，起始ID: {start_id}, 添加数量: {len(vectors)}")
+                for i, doc in enumerate(valid_docs):
+                    vector_id = start_id + i
+                    doc.id = f"{collection_name}_{vector_id}"
+                    doc.vector_id = vector_id
+                    self.metadata_store.add_document(doc, vector_id)
+                    doc_ids.append(doc.id)
 
             logger.debug(
-                f"已分配 {len(doc_ids)} 个文档ID (范围: {start_id}-{start_id + len(doc_ids) - 1})"
+                f"已分配 {len(doc_ids)} 个文档ID (范围: {doc_ids[0]} - {doc_ids[-1]})"
             )
 
             # 保存索引
@@ -964,20 +1026,40 @@ class EnhancedFaissStore(VectorDBBase):
             return final_results
 
     async def delete_documents(self, collection_name: str, doc_ids: List[str]) -> bool:
-        """从指定集合中删除文档"""
+        """从指定集合中删除文档（同步删除FAISS索引ID，若支持）"""
         if not await self.collection_exists(collection_name):
             logger.warning(f"集合 '{collection_name}' 不存在")
             return False
+
+        # 确保集合已加载
+        await self._ensure_collection_loaded(collection_name)
 
         db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
         metadata_store = SQLiteMetadataStore(db_path)
 
         deleted_count = 0
+        removed_ids: List[int] = []
         for doc_id in doc_ids:
+            # 先取vector_id
+            vec_id = metadata_store.get_vector_id_by_doc_id(doc_id)
             if metadata_store.delete_document(doc_id):
                 deleted_count += 1
+                if vec_id is not None:
+                    removed_ids.append(int(vec_id))
 
         metadata_store.close()
+
+        # 同步删除FAISS中的向量
+        if removed_ids:
+            if self.index_store and self.index_store.supports_id_map():
+                try:
+                    removed = self.index_store.remove_ids(np.array(removed_ids, dtype=np.int64))
+                    logger.info(f"已从FAISS索引删除 {removed}/{len(removed_ids)} 个ID")
+                    self.index_store.save_index()
+                except Exception as e:
+                    logger.error(f"删除FAISS索引ID失败: {e}")
+            else:
+                logger.warning("当前索引不支持按ID删除，建议执行重建索引以回收无效向量")
 
         logger.info(f"从集合 '{collection_name}' 中删除了 {deleted_count} 个文档")
         return deleted_count > 0
@@ -989,7 +1071,7 @@ class EnhancedFaissStore(VectorDBBase):
         content: Optional[str] = None,
         metadata: Optional[DocumentMetadata] = None,
     ) -> bool:
-        """更新指定集合中的文档"""
+        """更新指定集合中的文档（若索引支持则同步更新向量）"""
         if not await self.collection_exists(collection_name):
             logger.warning(f"集合 '{collection_name}' 不存在")
             return False
@@ -1007,7 +1089,6 @@ class EnhancedFaissStore(VectorDBBase):
         # 更新内容
         if content is not None:
             existing_doc.text_content = content
-            # 如果内容改变，需要重新生成embedding和keywords
             existing_doc.embedding = None  # 标记为需要重新生成
             existing_doc.keywords = self._extract_keywords(content)
             existing_doc.doc_hash = self._compute_hash(content)
@@ -1031,15 +1112,26 @@ class EnhancedFaissStore(VectorDBBase):
                 metadata_store.close()
                 return False
 
-        # 保存更新后的文档
-        # 注意：这里简化了处理，实际应用中可能需要更复杂的逻辑来处理向量索引的更新
-        # 例如，可能需要先从FAISS索引中删除旧向量，再添加新向量
-        # 为了保持简单，我们假设向量ID保持不变，只更新元数据
-        # 在实际生产环境中，这需要更仔细的设计
-        metadata_store.add_document(
-            existing_doc, existing_doc.vector_id
-        )  # 假设vector_id不变
+        # 保存更新后的文档（保持vector_id不变）
+        metadata_store.add_document(existing_doc, existing_doc.vector_id)
         metadata_store.close()
+
+        # 同步更新FAISS索引中的向量
+        if content is not None and existing_doc.embedding is not None:
+            vectors = np.array([existing_doc.embedding], dtype=np.float32)
+            faiss.normalize_L2(vectors)
+            if self.index_store and self.index_store.supports_id_map():
+                try:
+                    vid = int(existing_doc.vector_id)
+                    # 先删除旧向量，再以同ID添加新向量
+                    self.index_store.remove_ids(np.array([vid], dtype=np.int64))
+                    self.index_store.add_with_ids(vectors, np.array([vid], dtype=np.int64))
+                    self.index_store.save_index()
+                    logger.info(f"已同步更新FAISS向量，vector_id={vid}")
+                except Exception as e:
+                    logger.error(f"更新FAISS向量失败: {e}")
+            else:
+                logger.warning("当前索引不支持按ID更新，建议执行重建索引以生效最新内容")
 
         logger.info(f"成功更新文档 '{doc_id}' 在集合 '{collection_name}' 中")
         return True
@@ -1242,3 +1334,65 @@ class EnhancedFaissStore(VectorDBBase):
                     
         except Exception as e:
             logger.error(f"详细一致性检查失败: {e}")
+
+    # 新增：重建索引（以SQLite中的vector_id为准）
+    async def rebuild_index(self, collection_name: str, batch_size: int = 1000) -> Dict[str, Any]:
+        await self._ensure_collection_loaded(collection_name)
+        if self.index_store is None or self.metadata_store is None:
+            raise ValueError("索引或元数据存储未初始化")
+
+        dimension = self.index_store.dimension or 1536
+        logger.info(f"开始重建集合 '{collection_name}' 的FAISS索引（维度={dimension}）")
+
+        # 始终重建为IDMap2(FlatL2)
+        inner = faiss.IndexFlatL2(dimension)
+        new_index = faiss.IndexIDMap2(inner)
+
+        total_added = 0
+        total_batches = 0
+        for batch in self.metadata_store.iter_embeddings(batch_size=batch_size):
+            if not batch:
+                continue
+            ids = np.array([vid for vid, _ in batch], dtype=np.int64)
+            vecs = np.array([emb for _, emb in batch], dtype=np.float32)
+            faiss.normalize_L2(vecs)
+            new_index.add_with_ids(vecs, ids)
+            total_added += len(batch)
+            total_batches += 1
+            if total_batches % 10 == 0:
+                logger.info(f"重建进度：已添加 {total_added} 条向量...")
+
+        # 替换旧索引
+        self.index_store.index = new_index
+        self.index_store.save_index()
+
+        logger.info(f"重建完成：共添加 {total_added} 条向量")
+        return {
+            "collection": collection_name,
+            "vectors_in_index": int(self.index_store.count_vectors()),
+            "documents_in_db": int(await self.count_documents(collection_name)),
+            "rebuilt": True,
+            "added": int(total_added),
+        }
+
+    # 新增：分页列出文档
+    async def list_documents(self, collection_name: str, page: int, page_size: int) -> Dict[str, Any]:
+        if not await self.collection_exists(collection_name):
+            return {"documents": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+        await self._ensure_collection_loaded(collection_name)
+        offset = max(0, (page - 1) * page_size)
+        with self.get_metadata_store_for_collection(collection_name) as store:
+            docs = store.get_documents_page(offset, page_size)
+            total = store.count_documents()
+        return {
+            "documents": docs,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+        }
+
+    # 新增：获取索引向量数
+    async def get_index_count(self, collection_name: str) -> int:
+        await self._ensure_collection_loaded(collection_name)
+        return int(self.index_store.count_vectors() if self.index_store else 0)

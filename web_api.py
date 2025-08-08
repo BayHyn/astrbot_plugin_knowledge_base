@@ -97,6 +97,13 @@ class KnowledgeBaseWebAPI:
             ["GET"],
             "修复集合数据（检查数据一致性）",
         )
+        # 新增：暴露重建索引端点
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/debug/rebuild_index",
+            self.rebuild_index_api,
+            ["POST"],
+            "重建集合的FAISS索引",
+        )
 
     def _generate_safe_filename(self, original_filename: str) -> str:
         """生成安全的临时文件名，避免并发冲突"""
@@ -245,8 +252,10 @@ class KnowledgeBaseWebAPI:
             safe_filename = self._generate_safe_filename(upload_file.filename)
             temp_path = os.path.join(temp_dir, safe_filename)
 
-            # 立即保存文件
-            await upload_file.save(temp_path)
+            # quart.datastructures.FileStorage.save 是同步方法
+            # 使用线程池避免阻塞事件循环
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, upload_file.save, temp_path)
             logger.info(f"文件已保存到临时路径: {temp_path}")
 
         except Exception as e:
@@ -501,7 +510,7 @@ class KnowledgeBaseWebAPI:
 
     async def list_documents(self):
         """
-        获取指定集合中的文档列表
+        获取指定集合中的文档列表（使用SQLite分页）
         """
         collection_name = request.args.get("collection_name")
         page = int(request.args.get("page", 1))
@@ -516,39 +525,8 @@ class KnowledgeBaseWebAPI:
             return Response().error("目标知识库不存在").__dict__
 
         try:
-            # 计算偏移量
-            offset = (page - 1) * page_size
-
-            # 获取文档列表（这里需要假设向量数据库支持分页查询）
-            # 由于原始接口可能不支持分页，这里提供一个基础实现
-            total_count = await self.vec_db.count_documents(collection_name)
-
-            # 模拟获取文档列表（实际实现需要根据具体的向量数据库API）
-            documents = []
-
-            # 基础文档信息
-            for i in range(min(page_size, total_count - offset)):
-                doc_id = f"doc_{offset + i}"
-                documents.append(
-                    {
-                        "id": doc_id,
-                        "source": "unknown",  # 需要从元数据中获取
-                        "chunk_index": i,
-                        "created_at": "unknown",
-                        "preview": "文档预览内容..."[:100] + "...",
-                    }
-                )
-
-            result = {
-                "documents": documents,
-                "total": total_count,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": (total_count + page_size - 1) // page_size,
-            }
-
+            result = await self.vec_db.list_documents(collection_name, page, page_size)
             return Response().ok(data=result).__dict__
-
         except Exception as e:
             logger.error(f"获取文档列表失败: {str(e)}")
             return Response().error(f"获取文档列表失败: {str(e)}").__dict__
@@ -569,6 +547,12 @@ class KnowledgeBaseWebAPI:
         try:
             # 获取基础统计信息
             doc_count = await self.vec_db.count_documents(collection_name)
+            index_count = 0
+            try:
+                # 若底层实现暴露了获取索引向量数的API
+                index_count = await self.vec_db.get_index_count(collection_name)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
             # 获取集合元数据
             collection_metadata = (
@@ -585,6 +569,7 @@ class KnowledgeBaseWebAPI:
             # 统计信息
             stats = {
                 "document_count": doc_count,
+                "index_vectors": index_count,
                 "estimated_size_bytes": estimated_size,
                 "estimated_size_human": self._format_bytes(estimated_size),
                 "created_at": collection_metadata.get("created_at"),
@@ -613,7 +598,7 @@ class KnowledgeBaseWebAPI:
         return f"{bytes_size:.1f}TB"
 
     async def repair_collection_data(self):
-        """修复集合数据：检查并重新生成缺失的向量"""
+        """修复集合数据：检查并尽力纠正索引与数据库不一致"""
         collection_name = request.args.get("collection_name")
         logger.info(f"收到修复集合数据请求: {collection_name}")
 
@@ -624,30 +609,39 @@ class KnowledgeBaseWebAPI:
             return Response().error("目标知识库不存在").__dict__
 
         try:
-            # TODO: 实现数据修复逻辑
-            # 1. 检查数据库和索引的一致性
-            # 2. 重新生成缺失的向量
-            # 3. 重建索引文件
-
-            # 先获取基本信息
+            # 尝试运行一致性检查，并在必要时重建索引
             doc_count = await self.vec_db.count_documents(collection_name)
+            rebuilt = False
+            index_count = 0
+            try:
+                index_count = await self.vec_db.get_index_count(collection_name)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
-            # 检查向量索引状态（简化实现）
-            # 注意：EnhancedVectorStore 不直接暴露内部索引状态
-            # 这里使用文档数量作为估算
-            index_count = doc_count  # 假设索引与文档数量一致
+            consistent = (index_count == doc_count) if index_count else False
+            suggestion = ""
+            if not consistent:
+                try:
+                    info = await self.vec_db.rebuild_index(collection_name)  # type: ignore[attr-defined]
+                    rebuilt = info.get("rebuilt", False)
+                    index_count = info.get("vectors_in_index", 0)
+                    consistent = (index_count == doc_count)
+                    suggestion = "已自动重建索引。"
+                except Exception as e:
+                    suggestion = f"建议手动重建索引: {e}"
 
             repair_info = {
                 "collection_name": collection_name,
                 "documents_in_db": doc_count,
                 "vectors_in_index": index_count,
-                "consistent": True,  # 简化为总是一致
-                "repair_needed": False,  # 简化为不需要修复
-                "suggestion": "如果遇到搜索问题，请重新上传文档",
+                "consistent": consistent,
+                "repair_needed": not consistent,
+                "rebuilt": rebuilt,
+                "suggestion": suggestion or "检查完成",
             }
 
             logger.info(
-                f"集合 '{collection_name}' 数据状态: 数据库文档={doc_count}, 索引向量={index_count}"
+                f"集合 '{collection_name}' 数据状态: 数据库文档={doc_count}, 索引向量={index_count}, rebuilt={rebuilt}"
             )
 
             return Response().ok(data=repair_info).__dict__
@@ -655,3 +649,15 @@ class KnowledgeBaseWebAPI:
         except Exception as e:
             logger.error(f"修复集合数据失败: {str(e)}")
             return Response().error(f"修复失败: {str(e)}").__dict__
+
+    # 新增：重建索引API
+    async def rebuild_index_api(self):
+        data = await request.get_json()
+        collection_name = data.get("collection_name") if data else None
+        if not collection_name:
+            return Response().error("缺少集合名称").__dict__
+        try:
+            info = await self.vec_db.rebuild_index(collection_name)  # type: ignore[attr-defined]
+            return Response().ok(data=info, message="索引重建完成").__dict__
+        except Exception as e:
+            return Response().error(f"重建索引失败: {e}").__dict__

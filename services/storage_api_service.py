@@ -111,15 +111,13 @@ class StorageAPIService:
                     await self.vector_db.create_collection(collection_name)
                     logger.info(f"自动创建知识库: {collection_name}")
             
-            # 文本分块处理
+            # 文本分块处理（不修改共享实例配置，使用参数传入）
             if options.enable_chunking:
-                # 使用自定义分块参数
-                if options.chunk_size != self.text_splitter.chunk_size:
-                    self.text_splitter.chunk_size = options.chunk_size
-                if options.chunk_overlap != self.text_splitter.chunk_overlap:
-                    self.text_splitter.chunk_overlap = options.chunk_overlap
-                
-                chunks = await self.text_splitter.split_text(text_content)
+                chunks = await self.text_splitter.split_text(
+                    text_content,
+                    chunk_size=options.chunk_size,
+                    overlap=options.chunk_overlap,
+                )
             else:
                 chunks = [text_content]
             
@@ -145,7 +143,10 @@ class StorageAPIService:
             
             # 合并自定义元数据
             if options.custom_metadata:
-                base_metadata.update(options.custom_metadata)
+                # 统一放入 custom_fields，避免与顶层冲突
+                cf = base_metadata.get("custom_fields", {})
+                cf.update(options.custom_metadata)
+                base_metadata["custom_fields"] = cf
             
             # 创建文档列表
             documents = []
@@ -159,7 +160,10 @@ class StorageAPIService:
                 # 关键词提取 (如果启用)
                 if options.extract_keywords:
                     keywords = await self._extract_keywords(chunk)
-                    chunk_metadata["keywords"] = keywords
+                    # 放入 custom_fields.keywords，避免顶层冲突
+                    cf = chunk_metadata.get("custom_fields", {})
+                    cf["keywords"] = keywords
+                    chunk_metadata["custom_fields"] = cf
                 
                 doc = Document(
                     text_content=chunk,
@@ -228,13 +232,33 @@ class StorageAPIService:
                     error="Collection not found"
                 )
             
-            # 执行搜索
-            search_results = await self.vector_db.search(
-                collection_name=collection_name,
-                query_text=query_text,
-                top_k=options.top_k,
-                filters=options.filters
-            )
+            # 执行搜索，尊重是否启用重排
+            search_results: List[SearchResult]
+            try:
+                # 尝试针对增强存储临时关闭增强搜索
+                from ..vector_store.enhanced_wrapper import EnhancedVectorStore  # 局部导入避免循环
+                if isinstance(self.vector_db, EnhancedVectorStore) and not options.enable_rerank:
+                    prev = self.vector_db.use_enhanced_search
+                    self.vector_db.use_enhanced_search = False
+                    try:
+                        search_results = await self.vector_db.search(
+                            collection_name=collection_name,
+                            query_text=query_text,
+                            top_k=options.top_k,
+                            filters=options.filters,
+                        )
+                    finally:
+                        self.vector_db.use_enhanced_search = prev
+                else:
+                    search_results = await self.vector_db.search(
+                        collection_name=collection_name,
+                        query_text=query_text,
+                        top_k=options.top_k,
+                        filters=options.filters,
+                    )
+            except Exception as e:
+                logger.error(f"底层搜索失败: {e}")
+                return QueryResult(success=False, message="搜索失败", error=str(e))
             
             # 应用相似度阈值过滤
             if options.similarity_threshold > 0:

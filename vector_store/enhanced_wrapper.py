@@ -142,33 +142,21 @@ class EnhancedVectorStore(VectorDBBase):
         """关键词搜索"""
         try:
             # 使用关键词索引进行搜索
-            keyword_index = KeywordIndex(
-                str(self.data_path / f"{collection_name}.enhanced.db")
-            )
+            db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
+            keyword_index = KeywordIndex(db_path)
 
             # 执行BM25搜索
             keyword_results = keyword_index.search_with_bm25(query_text, limit)
 
-            # 转换为Document格式并获取完整文档
-            documents = []
+            # 确保集合已加载，便于通过 doc_id 直接获取文档
+            await self.enhanced_store._ensure_collection_loaded(collection_name)
+
+            documents: List[Tuple[Document, float]] = []
             for doc_id, score in keyword_results:
                 try:
-                    # 从增强存储获取完整文档
-                    search_results = await self.enhanced_store.search(
-                        collection_name, "", top_k=1000  # 获取大量结果用于ID匹配
-                    )
-                    
-                    # 找到匹配的文档
-                    for result in search_results:
-                        if isinstance(result, tuple):
-                            doc, _ = result
-                        else:
-                            doc = result.document
-                        
-                        if doc.id == doc_id:
-                            documents.append((doc, score))
-                            break
-                            
+                    doc = self.enhanced_store.metadata_store.get_document(doc_id)
+                    if doc:
+                        documents.append((doc, score))
                 except Exception as e:
                     logger.debug(f"获取文档 {doc_id} 失败: {e}")
                     continue
