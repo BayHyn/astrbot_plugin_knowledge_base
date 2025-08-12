@@ -3,6 +3,7 @@ import time
 import uuid
 import asyncio
 import threading
+import json
 from astrbot.api.star import Context
 from .services.document_service import DocumentService
 from .services.kb_service import KnowledgeBaseService
@@ -38,6 +39,10 @@ class KnowledgeBaseWebAPI:
         # 文件处理锁，防止并发冲突
         self._file_processing_lock = threading.Lock()
         self._temp_file_counter = 0
+        
+        # 任务持久化文件路径
+        self._tasks_file_path = os.path.join(get_astrbot_data_path(), "kb_tasks.json")
+        self._load_tasks_from_file()
 
         if VERSION < "3.5.13":
             raise RuntimeError("AstrBot 版本过低，无法支持此插件，请升级 AstrBot。")
@@ -96,6 +101,42 @@ class KnowledgeBaseWebAPI:
             self.repair_collection_data,
             ["GET"],
             "修复集合数据（检查数据一致性）",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/document/delete",
+            self.delete_document,
+            ["DELETE"],
+            "删除指定集合中的文档",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/update",
+            self.update_collection,
+            ["PUT"],
+            "更新集合的元数据信息",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/import",
+            self.import_collection,
+            ["POST"],
+            "导入集合数据",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/collection/batch_upload",
+            self.batch_upload_files,
+            ["POST"],
+            "批量上传文件到集合",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/recent_tasks",
+            self.get_recent_tasks,
+            ["GET"],
+            "获取最近的任务列表和状态",
+        )
+        self.astrbot_context.register_web_api(
+            "/alkaid/kb/tasks/cleanup",
+            self.cleanup_old_tasks,
+            ["POST"],
+            "清理旧的任务记录",
         )
 
     def _generate_safe_filename(self, original_filename: str) -> str:
@@ -254,9 +295,17 @@ class KnowledgeBaseWebAPI:
             return Response().error(f"保存文件失败: {str(e)}").__dict__
 
         task_id = f"task_{uuid.uuid4()}"
-        self.tasks[task_id] = {"status": "pending", "result": None}
+        task_info = {
+            "status": "pending", 
+            "result": None,
+            "filename": upload_file.filename,
+            "collection_name": collection_name,
+            "created_at": int(time.time())
+        }
+        self._add_task(task_id, task_info)
         logger.info(f"创建异步任务 {task_id} 用于处理文件 {upload_file.filename}")
 
+        # 立即启动异步任务，不等待完成
         asyncio.create_task(
             self._process_file_asynchronously(
                 task_id,
@@ -270,7 +319,10 @@ class KnowledgeBaseWebAPI:
 
         return (
             Response()
-            .ok(data={"task_id": task_id}, message="文件上传成功，正在后台处理。")
+            .ok(data={
+                "task_id": task_id,
+                "message": "文件已提交处理，请稍后查看处理结果"
+            }, message="文件上传成功，正在后台处理")
             .__dict__
         )
 
@@ -284,7 +336,7 @@ class KnowledgeBaseWebAPI:
         overlap_str,
     ):
         """异步处理文件，增强容错性和并发安全性"""
-        self.tasks[task_id]["status"] = "running"
+        self._update_task(task_id, {"status": "running"})
 
         try:
             logger.info(f"[Task {task_id}] 开始处理文件: {original_filename}")
@@ -360,12 +412,12 @@ class KnowledgeBaseWebAPI:
                 raise ValueError(f"添加文档到数据库失败: {e}")
 
             success_message = f"成功从文件 '{original_filename}' 添加 {len(doc_ids)} 条知识到 '{collection_name}'。"
-            self.tasks[task_id] = {"status": "success", "result": success_message}
+            self._update_task(task_id, {"status": "success", "result": success_message})
             logger.info(f"[Task {task_id}] 任务成功: {success_message}")
 
         except Exception as e:
             error_message = f"处理文件时发生错误: {str(e)}"
-            self.tasks[task_id] = {"status": "failed", "result": error_message}
+            self._update_task(task_id, {"status": "failed", "result": error_message})
             logger.error(f"[Task {task_id}] 任务失败: {error_message}", exc_info=True)
         finally:
             # 清理临时文件
@@ -655,3 +707,319 @@ class KnowledgeBaseWebAPI:
         except Exception as e:
             logger.error(f"修复集合数据失败: {str(e)}")
             return Response().error(f"修复失败: {str(e)}").__dict__
+
+    async def delete_document(self):
+        """删除指定集合中的单个文档"""
+        data = await request.get_json()
+        collection_name = data.get("collection_name")
+        document_id = data.get("document_id")
+        
+        logger.info(f"收到删除文档请求: collection={collection_name}, doc_id={document_id}")
+        
+        if not collection_name or not document_id:
+            return Response().error("缺少集合名称或文档ID").__dict__
+            
+        if not await self.vec_db.collection_exists(collection_name):
+            return Response().error("目标知识库不存在").__dict__
+            
+        try:
+            # 删除指定文档
+            deleted = await self.vec_db.delete_document(collection_name, document_id)
+            if deleted:
+                return Response().ok("文档删除成功").__dict__
+            else:
+                return Response().error("文档不存在或删除失败").__dict__
+        except Exception as e:
+            logger.error(f"删除文档失败: {str(e)}")
+            return Response().error(f"删除文档失败: {str(e)}").__dict__
+
+    async def update_collection(self):
+        """更新集合的元数据信息"""
+        data = await request.get_json()
+        collection_name = data.get("collection_name")
+        new_name = data.get("new_name")
+        emoji = data.get("emoji")
+        description = data.get("description")
+        
+        logger.info(f"收到更新集合元数据请求: {collection_name}")
+        
+        if not collection_name:
+            return Response().error("缺少集合名称").__dict__
+            
+        if not await self.vec_db.collection_exists(collection_name):
+            return Response().error("目标知识库不存在").__dict__
+            
+        try:
+            # 更新集合元数据
+            collection_metadata = (
+                self.user_prefs_handler.user_collection_preferences.get(
+                    "collection_metadata", {}
+                )
+            )
+            
+            if collection_name in collection_metadata:
+                metadata = collection_metadata[collection_name]
+                if emoji is not None:
+                    metadata["emoji"] = emoji
+                if description is not None:
+                    metadata["description"] = description
+                metadata["last_modified"] = int(time.time())
+                
+                # 如果需要重命名集合
+                if new_name and new_name != collection_name:
+                    if await self.vec_db.collection_exists(new_name):
+                        return Response().error("新集合名称已存在").__dict__
+                    
+                    # 重命名集合
+                    await self.vec_db.rename_collection(collection_name, new_name)
+                    
+                    # 更新元数据中的键名
+                    collection_metadata[new_name] = metadata
+                    del collection_metadata[collection_name]
+                else:
+                    collection_metadata[collection_name] = metadata
+                
+                self.user_prefs_handler.user_collection_preferences[
+                    "collection_metadata"
+                ] = collection_metadata
+                await self.user_prefs_handler.save_user_preferences()
+                
+                return Response().ok("集合信息更新成功").__dict__
+            else:
+                return Response().error("集合元数据不存在").__dict__
+                
+        except Exception as e:
+            logger.error(f"更新集合信息失败: {str(e)}")
+            return Response().error(f"更新失败: {str(e)}").__dict__
+
+    async def import_collection(self):
+        """导入集合数据"""
+        data = await request.get_json()
+        collection_data = data.get("collection_data")
+        overwrite = data.get("overwrite", False)
+        
+        logger.info(f"收到导入集合请求")
+        
+        if not collection_data:
+            return Response().error("缺少集合数据").__dict__
+            
+        try:
+            collection_name = collection_data.get("collection_name")
+            metadata = collection_data.get("metadata", {})
+            
+            if not collection_name:
+                return Response().error("集合数据格式错误").__dict__
+                
+            # 检查集合是否已存在
+            if await self.vec_db.collection_exists(collection_name) and not overwrite:
+                return Response().error("集合已存在，如需覆盖请设置overwrite=true").__dict__
+                
+            # 创建或覆盖集合
+            if overwrite and await self.vec_db.collection_exists(collection_name):
+                await self.vec_db.delete_collection(collection_name)
+                
+            await self.vec_db.create_collection(collection_name)
+            
+            # 导入元数据
+            collection_metadata = (
+                self.user_prefs_handler.user_collection_preferences.get(
+                    "collection_metadata", {}
+                )
+            )
+            collection_metadata[collection_name] = metadata
+            self.user_prefs_handler.user_collection_preferences[
+                "collection_metadata"
+            ] = collection_metadata
+            await self.user_prefs_handler.save_user_preferences()
+            
+            return Response().ok("集合导入成功").__dict__
+            
+        except Exception as e:
+            logger.error(f"导入集合失败: {str(e)}")
+            return Response().error(f"导入失败: {str(e)}").__dict__
+
+    async def batch_upload_files(self):
+        """批量上传文件到集合"""
+        files = await request.files
+        form_data = await request.form
+        collection_name = form_data.get("collection_name")
+        chunk_size = form_data.get("chunk_size")
+        overlap = form_data.get("chunk_overlap")
+        
+        logger.info(f"收到批量上传请求: collection={collection_name}, files={len(files)}")
+        
+        if not collection_name:
+            return Response().error("缺少集合名称").__dict__
+            
+        if not await self.vec_db.collection_exists(collection_name):
+            return Response().error("目标知识库不存在").__dict__
+            
+        if not files:
+            return Response().error("没有上传的文件").__dict__
+            
+        try:
+            task_ids = []
+            temp_dir = os.path.join(get_astrbot_data_path(), "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # 为每个文件创建异步任务
+            for file_key, upload_file in files.items():
+                if upload_file.filename:
+                    safe_filename = self._generate_safe_filename(upload_file.filename)
+                    temp_path = os.path.join(temp_dir, safe_filename)
+                    
+                    # 保存文件
+                    await upload_file.save(temp_path)
+                    
+                    # 创建处理任务
+                    task_id = f"batch_task_{uuid.uuid4()}"
+                    task_info = {
+                        "status": "pending", 
+                        "result": None, 
+                        "filename": upload_file.filename,
+                        "collection_name": collection_name,
+                        "created_at": int(time.time())
+                    }
+                    self._add_task(task_id, task_info)
+                    task_ids.append(task_id)
+                    
+                    # 启动异步处理
+                    asyncio.create_task(
+                        self._process_file_asynchronously(
+                            task_id,
+                            temp_path,
+                            upload_file.filename,
+                            collection_name,
+                            chunk_size,
+                            overlap,
+                        )
+                    )
+            
+            return Response().ok(
+                data={"task_ids": task_ids}, 
+                message=f"已提交{len(task_ids)}个文件的批量处理任务"
+            ).__dict__
+            
+        except Exception as e:
+            logger.error(f"批量上传失败: {str(e)}")
+            return Response().error(f"批量上传失败: {str(e)}").__dict__
+
+    async def get_recent_tasks(self):
+        """获取最近的任务列表和状态"""
+        collection_name = request.args.get("collection_name")
+        limit = int(request.args.get("limit", 20))
+        
+        logger.info(f"收到获取任务列表请求: collection_name={collection_name}, limit={limit}")
+        logger.info(f"当前任务总数: {len(self.tasks)}")
+        
+        try:
+            # 获取任务列表，如果指定了collection_name则过滤
+            recent_tasks = []
+            for task_id, task_info in self.tasks.items():
+                logger.debug(f"检查任务 {task_id}: {task_info}")
+                if collection_name and task_info.get("collection_name") != collection_name:
+                    continue
+                
+                recent_tasks.append({
+                    "task_id": task_id,
+                    "filename": task_info.get("filename", "未知文件"),
+                    "collection_name": task_info.get("collection_name", ""),
+                    "status": task_info.get("status", "unknown"),
+                    "result": task_info.get("result"),
+                    "created_at": task_info.get("created_at", 0)
+                })
+            
+            logger.info(f"过滤后的任务数量: {len(recent_tasks)}")
+            
+            # 按创建时间排序，最新的在前
+            recent_tasks.sort(key=lambda x: x["created_at"], reverse=True)
+            
+            # 限制返回数量
+            if limit > 0:
+                recent_tasks = recent_tasks[:limit]
+            
+            return Response().ok(data={
+                "tasks": recent_tasks,
+                "total": len(recent_tasks)
+            }).__dict__
+            
+        except Exception as e:
+            logger.error(f"获取任务列表失败: {str(e)}")
+            return Response().error(f"获取任务列表失败: {str(e)}").__dict__
+
+    async def cleanup_old_tasks(self):
+        """清理旧的任务记录"""
+        data = await request.get_json()
+        max_age_hours = data.get("max_age_hours", 24)  # 默认清理24小时前的任务
+        keep_completed = data.get("keep_completed", True)  # 是否保留已完成的任务
+        
+        try:
+            current_time = int(time.time())
+            max_age_seconds = max_age_hours * 3600
+            
+            tasks_to_remove = []
+            for task_id, task_info in self.tasks.items():
+                task_age = current_time - task_info.get("created_at", current_time)
+                
+                # 如果任务太旧
+                if task_age > max_age_seconds:
+                    # 如果设置了保留已完成任务，则跳过已完成的任务
+                    if keep_completed and task_info.get("status") == "success":
+                        continue
+                    tasks_to_remove.append(task_id)
+            
+            # 删除旧任务
+            removed_count = 0
+            for task_id in tasks_to_remove:
+                if task_id in self.tasks:
+                    del self.tasks[task_id]
+                    removed_count += 1
+            
+            # 保存更新后的任务数据
+            if removed_count > 0:
+                self._save_tasks_to_file()
+            
+            logger.info(f"清理了 {removed_count} 个旧任务记录")
+            
+            return Response().ok(data={
+                "removed_count": removed_count,
+                "remaining_count": len(self.tasks)
+            }, message=f"已清理 {removed_count} 个旧任务记录").__dict__
+            
+        except Exception as e:
+            logger.error(f"清理任务失败: {str(e)}")
+            return Response().error(f"清理任务失败: {str(e)}").__dict__
+
+    def _load_tasks_from_file(self):
+        """从文件加载任务数据"""
+        try:
+            if os.path.exists(self._tasks_file_path):
+                with open(self._tasks_file_path, 'r', encoding='utf-8') as f:
+                    self.tasks = json.load(f)
+                logger.info(f"从文件加载了 {len(self.tasks)} 个任务")
+            else:
+                self.tasks = {}
+                logger.info("任务文件不存在，初始化空任务字典")
+        except Exception as e:
+            logger.error(f"加载任务文件失败: {e}")
+            self.tasks = {}
+
+    def _save_tasks_to_file(self):
+        """保存任务数据到文件"""
+        try:
+            with open(self._tasks_file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+            logger.debug(f"任务数据已保存到文件，共 {len(self.tasks)} 个任务")
+        except Exception as e:
+            logger.error(f"保存任务文件失败: {e}")
+
+    def _add_task(self, task_id, task_info):
+        """添加任务并保存到文件"""
+        self.tasks[task_id] = task_info
+        self._save_tasks_to_file()
+
+    def _update_task(self, task_id, updates):
+        """更新任务状态并保存到文件"""
+        if task_id in self.tasks:
+            self.tasks[task_id].update(updates)
+            self._save_tasks_to_file()

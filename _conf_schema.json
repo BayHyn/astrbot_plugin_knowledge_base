@@ -182,5 +182,78 @@
                 "hint": "API请求失败时的最大重试次数"
             }
         }
+    },
+    "memory_optimization": {
+        "description": "内存优化配置",
+        "type": "object",
+        "hint": "LRU缓存和内存管理相关配置",
+        "items": {
+            "max_collections_in_memory": {
+                "description": "内存中最大集合数量",
+                "type": "int",
+                "default": 3,
+                "hint": "同时加载在内存中的知识库集合数量上限，超出时使用LRU策略驱逐"
+            },
+            "enable_lru_cache": {
+                "description": "启用LRU缓存",
+                "type": "bool",
+                "default": true,
+                "hint": "启用知识库集合的LRU缓存机制以优化内存使用"
+            },
+            "enable_memory_monitoring": {
+                "description": "启用内存监控",
+                "type": "bool",
+                "default": true,
+                "hint": "启用内存使用监控和自动清理机制"
+            },
+            "memory_threshold_mb": {
+                "description": "内存阈值 (MB)",
+                "type": "int",
+                "default": 1024,
+                "hint": "当内存使用超过此阈值时触发缓存清理"
+            },
+            "auto_evict_on_memory_pressure": {
+                "description": "内存压力下自动驱逐",
+                "type": "bool",
+                "default": true,
+                "hint": "当内存压力较大时自动驱逐最少使用的集合"
+            }
+        }
+    },
+    "performance_tuning": {
+        "description": "性能调优配置",
+        "type": "object",
+        "hint": "向量索引和搜索性能相关配置",
+        "items": {
+            "index_optimization_strategy": {
+                "description": "索引优化策略",
+                "type": "string",
+                "default": "auto",
+                "options": [
+                    "auto",
+                    "simple",
+                    "optimized"
+                ],
+                "hint": "auto: 根据数据量自动选择; simple: 使用基础索引; optimized: 使用优化索引"
+            },
+            "enable_hybrid_search": {
+                "description": "启用混合搜索",
+                "type": "bool",
+                "default": true,
+                "hint": "启用向量搜索+关键词搜索的混合模式"
+            },
+            "concurrent_search_enabled": {
+                "description": "启用并发搜索",
+                "type": "bool",
+                "default": true,
+                "hint": "允许多个搜索请求并发执行"
+            },
+            "search_timeout_seconds": {
+                "description": "搜索超时时间 (秒)",
+                "type": "int",
+                "default": 30,
+                "hint": "单次搜索操作的最大等待时间"
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 """
 增强型FAISS + SQLite向量存储实现
 提供关键词索引、知识图谱接口和重排序功能
-优化存储效率，支持向后兼容
+优化存储效率，支持向后兼容，支持LRU缓存
 """
 
 import os
@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import threading
 import time
+import gc
 from contextlib import contextmanager
+
+# 导入LRU缓存
+try:
+    from cachetools import LRUCache
+except ImportError:
+    raise ImportError("Please install cachetools: pip install cachetools")
 
 from .base import (
     VectorDBBase,
@@ -49,6 +56,125 @@ class StorageConfig:
     # - 根据预期数据规模动态调整配置
     # - 实现配置自动优化算法
     # - 支持运行时配置切换
+
+
+class CollectionCache:
+    """集合缓存管理器 - 实现LRU缓存机制"""
+    
+    def __init__(self, max_size: int = 3):
+        self.max_size = max_size
+        self.cache: LRUCache[str, Tuple['SQLiteMetadataStore', 'FAISSIndexStore']] = LRUCache(maxsize=max_size)
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._access_count: Dict[str, int] = {}
+        self._last_access: Dict[str, float] = {}
+        
+    async def get_or_load(self, collection_name: str, load_func) -> Tuple['SQLiteMetadataStore', 'FAISSIndexStore']:
+        """获取或加载集合，实现LRU缓存"""
+        current_time = time.time()
+        
+        # 检查缓存命中
+        if collection_name in self.cache:
+            self._access_count[collection_name] = self._access_count.get(collection_name, 0) + 1
+            self._last_access[collection_name] = current_time
+            logger.debug(f"缓存命中: '{collection_name}' (访问次数: {self._access_count[collection_name]})")
+            return self.cache[collection_name]
+            
+        # 获取或创建锁
+        lock = self._locks.setdefault(collection_name, asyncio.Lock())
+        
+        async with lock:
+            # 双重检查锁定
+            if collection_name in self.cache:
+                self._access_count[collection_name] = self._access_count.get(collection_name, 0) + 1
+                self._last_access[collection_name] = current_time
+                return self.cache[collection_name]
+                
+            logger.info(f"缓存未命中，加载集合: '{collection_name}'")
+            
+            # 检查是否需要驱逐
+            if len(self.cache) >= self.max_size:
+                await self._evict_lru()
+                
+            # 加载新集合
+            try:
+                metadata_store, index_store = await load_func()
+                self.cache[collection_name] = (metadata_store, index_store)
+                self._access_count[collection_name] = 1
+                self._last_access[collection_name] = current_time
+                
+                logger.info(f"集合 '{collection_name}' 已加载到缓存 ({len(self.cache)}/{self.max_size})")
+                return metadata_store, index_store
+            except Exception as e:
+                logger.error(f"加载集合 '{collection_name}' 失败: {e}")
+                # 清理可能残留的锁
+                self._locks.pop(collection_name, None)
+                raise
+                
+    async def _evict_lru(self):
+        """驱逐最少使用的集合"""
+        if not self.cache:
+            return
+            
+        # 获取最少使用的集合（LRUCache自动处理）
+        lru_name, (metadata_store, index_store) = self.cache.popitem()
+        
+        # 清理资源
+        try:
+            if hasattr(metadata_store, 'close'):
+                metadata_store.close()
+            if hasattr(index_store, 'close'):
+                index_store.close()
+                
+            # 清理追踪信息
+            self._locks.pop(lru_name, None)
+            self._access_count.pop(lru_name, None)
+            self._last_access.pop(lru_name, None)
+            
+            logger.info(f"已从缓存中驱逐集合: '{lru_name}'")
+            
+            # 触发垃圾回收
+            gc.collect()
+            
+        except Exception as e:
+            logger.error(f"驱逐集合 '{lru_name}' 时出错: {e}")
+            
+    async def remove(self, collection_name: str):
+        """从缓存中移除指定集合"""
+        if collection_name in self.cache:
+            metadata_store, index_store = self.cache.pop(collection_name)
+            
+            try:
+                if hasattr(metadata_store, 'close'):
+                    metadata_store.close()
+                if hasattr(index_store, 'close'):
+                    index_store.close()
+            except Exception as e:
+                logger.error(f"关闭集合 '{collection_name}' 时出错: {e}")
+                
+            # 清理追踪信息
+            self._locks.pop(collection_name, None)
+            self._access_count.pop(collection_name, None)
+            self._last_access.pop(collection_name, None)
+            
+            logger.info(f"已从缓存中移除集合: '{collection_name}'")
+            
+    async def clear(self):
+        """清空所有缓存"""
+        collections_to_clear = list(self.cache.keys())
+        for collection_name in collections_to_clear:
+            await self.remove(collection_name)
+            
+        logger.info("已清空所有集合缓存")
+        
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        return {
+            "cache_size": len(self.cache),
+            "max_size": self.max_size,
+            "cached_collections": list(self.cache.keys()),
+            "access_counts": self._access_count.copy(),
+            "last_access_times": self._last_access.copy()
+        }
 
 
 # 增强的文档结构
@@ -645,6 +771,7 @@ class EnhancedFaissStore(VectorDBBase):
         data_path: str,
         config: Optional[StorageConfig] = None,
         user_prefs_handler=None,
+        max_collections_in_memory: int = 3,
     ):
         super().__init__(embedding_util, data_path)
         self.config = config or StorageConfig()
@@ -653,41 +780,50 @@ class EnhancedFaissStore(VectorDBBase):
         # 创建数据目录
         os.makedirs(data_path, exist_ok=True)
 
-        # 初始化存储组件
+        # 初始化LRU缓存
+        self.collection_cache = CollectionCache(max_size=max_collections_in_memory)
+        
+        # 当前活动的存储组件（通过缓存获取）
         self.metadata_store = None
         self.index_store = None
         self.collection_name = None
 
         # 缓存和锁
         self._cache = {}
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # 全局锁
+        self._collection_locks: Dict[str, asyncio.Lock] = {}  # 集合级别的读写锁
+        
+        logger.info(f"增强型FAISS存储初始化，LRU缓存大小: {max_collections_in_memory}")
+        
+    async def _get_collection_lock(self, collection_name: str) -> asyncio.Lock:
+        """获取集合专用的读写锁"""
+        if collection_name not in self._collection_locks:
+            # 使用全局锁来保护锁的创建
+            async with self._lock:
+                # 双重检查锁定
+                if collection_name not in self._collection_locks:
+                    self._collection_locks[collection_name] = asyncio.Lock()
+        return self._collection_locks[collection_name]
 
     async def initialize(self):
         """初始化存储"""
         logger.info("初始化增强型FAISS存储...")
 
     async def _ensure_collection_loaded(self, collection_name: str):
-        """确保指定的集合已被加载"""
-        if (
-            self.collection_name != collection_name
-            or not self.metadata_store
-            or not self.index_store
-        ):
-            # 需要切换或首次加载集合
-            if self.metadata_store:
-                self.metadata_store.close()
-            if self.index_store:
-                self.index_store.close()
-
-            # 加载新集合
+        """确保指定的集合已被加载（使用LRU缓存）"""
+        if self.collection_name == collection_name and self.metadata_store and self.index_store:
+            # 当前集合已加载
+            return
+            
+        async def load_func():
+            """加载集合的函数"""
             db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
             index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
-
-            self.metadata_store = SQLiteMetadataStore(db_path)
-            self.index_store = FAISSIndexStore(index_path, self.config)
-
-            # 总是需要初始化索引，无论文件是否存在
-            # TODO: 优化索引初始化逻辑，支持动态维度检测
+            
+            metadata_store = SQLiteMetadataStore(db_path)
+            index_store = FAISSIndexStore(index_path, self.config)
+            
+            # 初始化索引
             try:
                 dimension = self.embedding_util.get_dimensions(
                     collection_name, self.user_prefs_handler
@@ -696,23 +832,32 @@ class EnhancedFaissStore(VectorDBBase):
                     logger.warning(f"无法获取有效的embedding维度，使用默认值1536")
                     dimension = 1536  # 默认维度
 
-                self.index_store.initialize(dimension)
+                index_store.initialize(dimension)
                 logger.debug(f"索引初始化成功，维度: {dimension}")
             except Exception as e:
                 logger.error(f"索引初始化失败: {e}")
                 # 使用默认维度重试
                 try:
-                    self.index_store.initialize(1536)
+                    index_store.initialize(1536)
                     logger.info("使用默认维度1536重新初始化索引成功")
                 except Exception as retry_e:
                     logger.error(f"使用默认维度重新初始化索引也失败: {retry_e}")
                     raise ValueError(f"索引初始化失败: {retry_e}")
-
-            self.collection_name = collection_name
+                    
+            return metadata_store, index_store
+            
+        # 使用LRU缓存获取或加载集合
+        self.metadata_store, self.index_store = await self.collection_cache.get_or_load(
+            collection_name, load_func
+        )
+        self.collection_name = collection_name
 
     async def create_collection(self, collection_name: str):
-        """创建集合"""
-        async with self._lock:
+        """创建集合（使用集合级别的写锁）"""
+        collection_lock = await self._get_collection_lock(collection_name)
+        
+        # 创建集合是写操作，需要独占锁
+        async with collection_lock:
             if await self.collection_exists(collection_name):
                 logger.info(f"集合 '{collection_name}' 已存在")
                 return
@@ -742,8 +887,11 @@ class EnhancedFaissStore(VectorDBBase):
     async def add_documents(
         self, collection_name: str, documents: List[Document]
     ) -> List[str]:
-        """添加文档到集合"""
-        async with self._lock:
+        """添加文档到集合（使用集合级别的写锁）"""
+        collection_lock = await self._get_collection_lock(collection_name)
+        
+        # 添加文档是写操作，需要独占锁
+        async with collection_lock:
             if not await self.collection_exists(collection_name):
                 await self.create_collection(collection_name)
 
@@ -817,17 +965,72 @@ class EnhancedFaissStore(VectorDBBase):
                     logger.error(f"重新初始化索引失败: {e}")
                     raise ValueError(f"索引初始化失败，无法添加向量: {e}")
 
-            start_id = self.index_store.add_vectors(vectors)
-            logger.info(f"向量添加成功，起始ID: {start_id}, 添加数量: {len(vectors)}")
-
-            # 添加到SQLite - 修复ID映射问题
+            # 记录添加前的状态，用于回滚
+            original_index_count = self.index_store.count_vectors()
             doc_ids = []
-            for i, doc in enumerate(valid_docs):
-                vector_id = start_id + i
-                doc.id = f"{collection_name}_{vector_id}"
-                doc.vector_id = vector_id
-                self.metadata_store.add_document(doc, vector_id)
-                doc_ids.append(doc.id)
+            
+            try:
+                # 步骤1：添加向量到FAISS
+                start_id = self.index_store.add_vectors(vectors)
+                logger.info(f"向量添加成功，起始ID: {start_id}, 添加数量: {len(vectors)}")
+                
+                # 步骤2：批量添加文档到SQLite（事务性）
+                with self.metadata_store._get_connection() as conn:
+                    # 开始数据库事务
+                    conn.execute("BEGIN TRANSACTION")
+                    
+                    try:
+                        for i, doc in enumerate(valid_docs):
+                            vector_id = start_id + i
+                            doc.id = f"{collection_name}_{vector_id}"
+                            doc.vector_id = vector_id
+                            
+                            # 添加到数据库（在事务中）
+                            cursor = conn.execute(
+                                """
+                                INSERT OR REPLACE INTO documents 
+                                (doc_id, text_content, embedding, metadata, keywords, doc_hash, 
+                                 created_at, updated_at, vector_id)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                                (
+                                    doc.id,
+                                    doc.text_content,
+                                    pickle.dumps(doc.embedding) if doc.embedding else None,
+                                    json.dumps(doc.metadata.__dict__ if hasattr(doc.metadata, '__dict__') else doc.metadata),
+                                    json.dumps(doc.keywords),
+                                    doc.doc_hash,
+                                    doc.created_at,
+                                    doc.updated_at,
+                                    vector_id,
+                                ),
+                            )
+                            
+                            # 更新FTS索引
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO keywords_fts (doc_id, keywords, text_content)
+                                VALUES (?, ?, ?)
+                            """,
+                                (doc.id, " ".join(doc.keywords), doc.text_content),
+                            )
+                            
+                            doc_ids.append(doc.id)
+                        
+                        # 提交数据库事务
+                        conn.execute("COMMIT")
+                        logger.info(f"成功添加 {len(doc_ids)} 个文档的元数据")
+                        
+                    except Exception as db_error:
+                        # 数据库操作失败，回滚数据库事务
+                        conn.execute("ROLLBACK")
+                        raise db_error
+                        
+            except Exception as e:
+                # 如果SQLite添加失败，需要回滚FAISS索引
+                logger.error(f"添加文档失败: {e}")
+                await self._rollback_faiss_index(collection_name, original_index_count)
+                raise
 
             logger.debug(
                 f"已分配 {len(doc_ids)} 个文档ID (范围: {start_id}-{start_id + len(doc_ids) - 1})"
@@ -849,8 +1052,11 @@ class EnhancedFaissStore(VectorDBBase):
         top_k: int = 5,
         filters: Optional[Filter] = None,
     ) -> List[SearchResult]:
-        """搜索相似文档"""
-        async with self._lock:
+        """搜索相似文档（使用集合级别的读锁）"""
+        collection_lock = await self._get_collection_lock(collection_name)
+        
+        # 搜索是读操作，使用读锁允许并发搜索
+        async with collection_lock:
             logger.debug(
                 f"开始搜索，集合: {collection_name}, 查询: '{query_text}', top_k: {top_k}"
             )
@@ -1047,6 +1253,15 @@ class EnhancedFaissStore(VectorDBBase):
     async def delete_collection(self, collection_name: str) -> bool:
         """删除集合"""
         try:
+            # 先从缓存中移除
+            await self.collection_cache.remove(collection_name)
+            
+            # 如果当前活动集合是要删除的集合，清空当前引用
+            if self.collection_name == collection_name:
+                self.metadata_store = None
+                self.index_store = None
+                self.collection_name = None
+            
             # 删除文件（无论集合是否完整都尝试删除相关文件）
             db_path = os.path.join(self.data_path, f"{collection_name}.enhanced.db")
             index_path = os.path.join(self.data_path, f"{collection_name}.faiss")
@@ -1146,11 +1361,22 @@ class EnhancedFaissStore(VectorDBBase):
 
     async def close(self):
         """关闭存储"""
-        if self.metadata_store:
-            self.metadata_store.close()
-        if self.index_store:
-            self.index_store.close()
-        logger.info("增强型FAISS存储已关闭")
+        # 清空所有缓存
+        await self.collection_cache.clear()
+        
+        # 清空当前引用
+        self.metadata_store = None
+        self.index_store = None
+        self.collection_name = None
+        
+        # 清理锁
+        self._collection_locks.clear()
+        
+        logger.info("增强型FAISS存储已关闭，所有缓存和锁已清理")
+        
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        return self.collection_cache.get_cache_stats()
 
     def _extract_keywords(self, text: str) -> List[str]:
         """使用jieba提取关键词"""
@@ -1242,3 +1468,47 @@ class EnhancedFaissStore(VectorDBBase):
                     
         except Exception as e:
             logger.error(f"详细一致性检查失败: {e}")
+
+    async def _rollback_faiss_index(self, collection_name: str, target_count: int):
+        """回滚FAISS索引到指定数量（重建索引）"""
+        try:
+            logger.warning(f"正在回滚FAISS索引，目标数量: {target_count}")
+            
+            if target_count == 0:
+                # 重新创建空索引
+                dimension = self.index_store.dimension
+                self.index_store.create_index()
+                logger.info("已重新创建空索引")
+            else:
+                # 需要从SQLite重新构建索引
+                with self.metadata_store._get_connection() as conn:
+                    cursor = conn.execute(
+                        "SELECT embedding, vector_id FROM documents WHERE vector_id < ? ORDER BY vector_id",
+                        (target_count,)
+                    )
+                    
+                    # 重新构建索引
+                    embeddings = []
+                    for row in cursor.fetchall():
+                        if row["embedding"]:
+                            embedding = pickle.loads(row["embedding"])
+                            embeddings.append(embedding)
+                    
+                    if embeddings:
+                        vectors = np.array(embeddings).astype("float32")
+                        faiss.normalize_L2(vectors)
+                        
+                        # 重新创建索引并添加向量
+                        self.index_store.create_index()
+                        self.index_store.add_vectors(vectors)
+                        
+                        logger.info(f"已重建索引，恢复 {len(embeddings)} 个向量")
+                        
+        except Exception as rollback_error:
+            logger.error(f"回滚FAISS索引失败: {rollback_error}")
+            # 如果回滚也失败，至少重新创建空索引
+            try:
+                self.index_store.create_index()
+                logger.warning("回滚失败，已重新创建空索引")
+            except Exception as final_error:
+                logger.error(f"创建空索引也失败: {final_error}")
