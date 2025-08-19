@@ -22,6 +22,9 @@ class MilvusLiteStore(VectorDBBase):
         self.varchar_max_length = kwargs.get("varchar_max_length", 65535)
         self.pk_max_length = kwargs.get("pk_max_length", 36)
 
+        self._ensured_rerank = False
+        self.rerank_provider = None
+
     async def initialize(self):
         logger.info(f"初始化 Milvus Lite 客户端，数据文件: {self.data_path}...")
         try:
@@ -351,10 +354,20 @@ class MilvusLiteStore(VectorDBBase):
             logger.info(f"Milvus Lite 集合 '{collection_name}' 为空，无法搜索。")
             return []
 
-        query_embedding = await self.embedding_util.get_embedding_async(query_text, collection_name)
+        query_embedding = await self.embedding_util.get_embedding_async(
+            query_text, collection_name
+        )
         if query_embedding is None:
             logger.error("无法为查询文本生成 embedding。")
             return []
+
+        # lazy load rerank
+        if not self._ensured_rerank:
+            self.rerank_provider = self.embedding_util.get_rerank_provider(
+                collection_name
+            )
+            self._ensured_rerank = True
+        top_k_ = max(20, top_k) if self.rerank_provider else top_k
 
         # 动态获取可检索的字段列表
         fields_to_request = []
@@ -420,9 +433,9 @@ class MilvusLiteStore(VectorDBBase):
                 data=[query_embedding],
                 anns_field="embedding",  # 向量字段名
                 filter=filter_expr if filter_expr else "",
-                limit=min(top_k, num_docs)
+                limit=min(top_k_, num_docs)
                 if num_docs > 0
-                else top_k,  # 确保 limit 不超过文档数
+                else top_k_,  # 确保 limit 不超过文档数
                 output_fields=fields_to_request
                 if fields_to_request
                 else None,  # 如果列表为空，则不指定，让其返回默认
@@ -457,7 +470,29 @@ class MilvusLiteStore(VectorDBBase):
                         id=doc_id, text_content=text_content, metadata=metadata
                     )
                     processed_results.append((doc, similarity_score))
-            return processed_results
+
+            if self.rerank_provider:
+                try:
+                    documents = [doc.text_content for doc, _ in processed_results]
+                    reranked_results = await self.rerank_provider.rerank(
+                        query_text, documents
+                    )
+                    reranked_results = sorted(
+                        reranked_results, key=lambda x: x.relevance_score, reverse=True
+                    )
+                    processed_results = [
+                        (
+                            processed_results[reranked_result.index][0],
+                            reranked_result.relevance_score,
+                        )
+                        for reranked_result in reranked_results
+                    ]
+                except Exception:
+                    logger.warning(
+                        f"在 Milvus Lite 集合 '{collection_name}' 中使用 Rerank Provider 进行重排序失败。"
+                    )
+
+            return processed_results[:top_k]
         except Exception as e:
             logger.error(
                 f"在 Milvus Lite 集合 '{collection_name}' 中搜索失败: {e}",

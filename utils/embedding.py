@@ -238,6 +238,26 @@ class EmbeddingSolutionHelper:
                 f"未找到适用于集合 '{collection_name}' 的 AstrBot 嵌入提供商。请检查用户偏好设置或集合元数据。"
             )
 
+    def get_rerank_provider(self, collection_name: str):
+        """获取对应集合的重排序提供商"""
+        try:
+            from astrbot.core.provider.provider import RerankProvider
+        except Exception:
+            logger.error("无法导入 RerankProvider，请确保 AstrBot 版本 >= v4.0.0。")
+            return None
+        astrbot_rerank_provider_id = (
+            self.user_prefs_handler.user_collection_preferences.get(
+                "collection_metadata", {}
+            )
+            .get(collection_name, {})
+            .get("rerank_provider_id", None)
+        )
+        if astrbot_rerank_provider_id:
+            provider = self.context.get_provider_by_id(astrbot_rerank_provider_id)
+            if provider and isinstance(provider, RerankProvider):
+                return provider
+        return None
+
     async def get_embedding_async(
         self, text: str, collection_name: str
     ) -> Optional[List[float]]:

@@ -105,6 +105,7 @@ class KnowledgeBaseWebAPI:
                 "file_id": f"KBDB_{str(uuid.uuid4())}",  # 文件 ID
                 "origin": "astrbot-webui",
                 "embedding_provider_id": embedding_provider_id,  # AstrBot 嵌入提供商 ID
+                "rerank_provider_id": data.get("rerank_provider_id", None),
             }
             collection_metadata = (
                 self.user_prefs_handler.user_collection_preferences.get(
@@ -131,7 +132,7 @@ class KnowledgeBaseWebAPI:
                 return Response().error(str(e)).__dict__
 
             await self.vec_db.create_collection(collection_name)
-            return Response().ok("集合创建成功").__dict__
+            return Response().ok(message="集合创建成功").__dict__
         except Exception as e:
             return Response().error(f"创建集合失败: {str(e)}").__dict__
 

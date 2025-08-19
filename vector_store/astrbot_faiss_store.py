@@ -29,6 +29,7 @@ DEFAULT_MAX_CONCURRENT_BATCHES = 10
 # 定义任务分块处理的乘数，用于限制内存中并发任务对象的数量
 DEFAULT_TASK_CHUNK_SIZE_MULTIPLIER = 5
 
+
 def _check_pickle_file(file_path: str) -> bool:
     """检查文件是否为 Pickle 格式"""
     try:
@@ -231,11 +232,15 @@ class FaissStore(VectorDBBase):
             embedding_util=self.embedding_util,
             collection_name=collection_name,
         )
-        vecdb = FaissVecDB(
-            doc_store_path=storage_path,
-            index_store_path=index_path,
-            embedding_provider=self.embedding_utils[collection_name],
-        )
+        params = {
+            "doc_store_path": storage_path,
+            "index_store_path": index_path,
+            "embedding_provider": self.embedding_utils[collection_name],
+        }
+        rerank_prov = self.embedding_util.get_rerank_provider(collection_name)
+        if rerank_prov:
+            params["rerank_provider"] = rerank_prov
+        vecdb = FaissVecDB(**params)
         await vecdb.initialize()
         logger.info(f"Faiss 集合实例 '{collection_name}' 加载/创建完成。")
         return vecdb
@@ -556,10 +561,15 @@ class FaissStore(VectorDBBase):
             return []
 
         try:
-            results = await vecdb.retrieve(
-                query=query_text,
-                k=top_k,
-            )
+            if vecdb.rerank_provider:
+                results = await vecdb.retrieve(
+                    query=query_text,
+                    k=max(20, top_k),
+                    rerank=True,
+                )
+                results = results[:top_k]
+            else:
+                results = await vecdb.retrieve(query=query_text, k=top_k, rerank=False)
         except Exception as e:
             logger.error(f"在集合 '{collection_name}' 中搜索时发生错误: {e}")
             return []

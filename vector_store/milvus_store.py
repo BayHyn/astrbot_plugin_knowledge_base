@@ -714,6 +714,14 @@ class MilvusStore(VectorDBBase):
             )
             return []
 
+        # lazy load rerank
+        if not self._ensured_rerank:
+            self.rerank_provider = self.embedding_util.get_rerank_provider(
+                collection_name
+            )
+            self._ensured_rerank = True
+        top_k_ = max(20, top_k) if self.rerank_provider else top_k
+
         # 确保索引和加载在搜索前完成
         try:
             await self._ensure_index_and_load(collection)  # <--- 关键调用
@@ -793,7 +801,7 @@ class MilvusStore(VectorDBBase):
                 data=[query_embedding],
                 anns_field="embedding",
                 param=search_params,
-                limit=min(top_k, num_docs) if num_docs > 0 else top_k,
+                limit=min(top_k_, num_docs) if num_docs > 0 else top_k_,
                 expr=filter_expr if filter_expr else None,  # None 表示无过滤
                 output_fields=fields_to_request if fields_to_request else None,
                 consistency_level=self.consistency_level_str,  # 使用字符串形式的一致性级别
@@ -818,15 +826,35 @@ class MilvusStore(VectorDBBase):
                     entity_data = result.get("entity", {})
                     text_content = entity_data.get("text_content", "")
 
-                    metadata = {
-                        k: v for k, v in result.items() if k != "entity"
-                    }
+                    metadata = {k: v for k, v in result.items() if k != "entity"}
 
                     doc = Document(
                         id=doc_id, text_content=text_content, metadata=metadata
                     )
                     processed_results.append((doc, similarity_score))
-            return processed_results
+
+            if self.rerank_provider:
+                try:
+                    documents = [doc.text_content for doc, _ in processed_results]
+                    reranked_results = await self.rerank_provider.rerank(
+                        query_text, documents
+                    )
+                    reranked_results = sorted(
+                        reranked_results, key=lambda x: x.relevance_score, reverse=True
+                    )
+                    processed_results = [
+                        (
+                            processed_results[reranked_result.index][0],
+                            reranked_result.relevance_score,
+                        )
+                        for reranked_result in reranked_results
+                    ]
+                except Exception:
+                    logger.warning(
+                        f"在 Milvus 集合 '{collection_name}' 中使用 Rerank Provider 进行重排序失败。"
+                    )
+
+            return processed_results[:top_k]
         except Exception as e:
             logger.error(
                 f"在远程 Milvus 集合 '{collection_name}' (alias: {self.alias}) 中搜索失败: {e}",
