@@ -78,18 +78,13 @@ async def enhance_request_with_kb(
     default_collection_name = user_prefs_handler.get_user_default_collection(event)
 
     if not default_collection_name:
-        logger.debug("未找到当前会话的默认知识库，跳过 LLM 请求增强。")
+        logger.debug("未找到当前会话的默认知识库，跳过知识库查询。")
         return
 
     if not await vector_db.collection_exists(default_collection_name):
         logger.warning(
-            f"用户默认知识库 '{default_collection_name}' 不存在，跳过 LLM 请求增强。"
+            f"知识库 '{default_collection_name}' 不存在，跳过知识库查询。"
         )
-        return
-
-    enable_kb_enhancement = plugin_config.get("enable_kb_llm_enhancement", True)
-    if not enable_kb_enhancement:
-        logger.info("知识库对LLM请求的增强功能已全局禁用。")
         return
 
     kb_search_top_k = plugin_config.get("kb_llm_search_top_k", 3)

@@ -4,19 +4,27 @@ import os
 from typing import Dict, AsyncGenerator, TYPE_CHECKING
 
 from astrbot.api import logger, AstrBotConfig
+from astrbot.api.star import Context
 from astrbot.api.event import AstrMessageEvent
+from astrbot.core.config.default import VERSION
+
 if TYPE_CHECKING:
     from ..vector_store.base import VectorDBBase
 
 
 class UserPrefsHandler:
     def __init__(
-        self, prefs_path: str, vector_db: "VectorDBBase", config: AstrBotConfig
+        self,
+        prefs_path: str,
+        vector_db: "VectorDBBase",
+        config: AstrBotConfig,
+        context: Context,
     ):
         self.user_prefs_path = prefs_path
         self.user_collection_preferences: Dict[str, str] = {}
         self.vector_db = vector_db
         self.config = config
+        self.context = context
 
     async def load_user_preferences(self):
         try:
@@ -44,9 +52,16 @@ class UserPrefsHandler:
 
     def get_user_default_collection(self, event: AstrMessageEvent) -> str:
         user_key = event.unified_msg_origin
-        return self.user_collection_preferences.get(
-            user_key, self.config.get("default_collection_name", "general")
-        )
+        if user_kb_perf := self.user_collection_preferences.get(user_key, None):
+            # 用户会话偏好优先
+            return user_kb_perf
+        if VERSION >= "4.0.0":
+            astrbot_cfg = self.context.get_config(umo=user_key)
+            # 返回空字符串代表不使用知识库
+            return astrbot_cfg.get("default_kb_collection", "")
+        # 小于 4.0.0 版本使用插件配置中的默认知识库
+        return self.config.get("default_collection_name", "general")
+
 
     async def set_user_default_collection(
         self, event: AstrMessageEvent, collection_name: str
@@ -87,9 +102,7 @@ class UserPrefsHandler:
 
     def get_collection_name_by_file_id(self, file_id: str = None) -> dict:
         """获取集合的元数据，包括嵌入提供商信息"""
-        metadatas = self.user_collection_preferences.get(
-            "collection_metadata", {}
-        )
+        metadatas = self.user_collection_preferences.get("collection_metadata", {})
         for collection_name, metadata in metadatas.items():
             if metadata.get("file_id") == file_id:
                 return collection_name

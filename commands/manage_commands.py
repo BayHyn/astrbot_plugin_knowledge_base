@@ -1,6 +1,7 @@
 # astrbot_plugin_knowledge_base/command_handlers/manage_commands.py
 from typing import Optional, TYPE_CHECKING, AsyncGenerator
 from astrbot.api import logger
+from astrbot.core.config.default import VERSION
 from astrbot.api.event import AstrMessageEvent
 from ..utils.migrate_files import migrate_docs_to_db
 
@@ -48,6 +49,18 @@ async def handle_create_collection(
         yield event.plain_result(f"创建知识库 '{collection_name}' 失败: {e}")
 
 
+def get_default_collection_name(
+    plugin: "KnowledgeBasePlugin", confirm_event: AstrMessageEvent
+) -> str:
+    umo = confirm_event.unified_msg_origin
+    if VERSION >= "4.0.0":
+        astrbot_cfg = plugin.context.get_config(umo=umo)
+        # 返回空字符串代表不使用知识库
+        return astrbot_cfg.get("default_kb_collection", "")
+    # 小于 4.0.0 版本使用插件配置中的默认知识库
+    return plugin.config.get("default_collection_name", "general")
+
+
 async def handle_delete_collection_logic(
     plugin: "KnowledgeBasePlugin", confirm_event: AstrMessageEvent, collection_name: str
 ):
@@ -58,7 +71,7 @@ async def handle_delete_collection_logic(
         )
         success = await plugin.vector_db.delete_collection(collection_name)
         if success:
-            global_default = plugin.config.get("default_collection_name", "general")
+            global_default = get_default_collection_name(plugin, confirm_event)
             updated_prefs = False
             # Iterate over a copy for safe modification
             for user_key, pref_col in list(

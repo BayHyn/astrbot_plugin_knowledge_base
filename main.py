@@ -78,7 +78,7 @@ class KnowledgeBasePlugin(Star):
             logger.info("知识库插件开始初始化...")
             # User Preferences Handler
             self.user_prefs_handler = UserPrefsHandler(
-                self.user_prefs_path, self.vector_db, self.config
+                self.user_prefs_path, self.vector_db, self.config, self.context
             )
             await self.user_prefs_handler.load_user_preferences()
 

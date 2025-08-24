@@ -12,43 +12,62 @@
     "default_collection_name": {
         "description": "默认知识库集合名称",
         "type": "string",
-        "default": "general"
+        "default": "general",
+        "hint": "AstrBot 版本 >= v4.0.0 时，本配置项失效，请直接在 WebUI `配置文件` 页下配置知识库。"
     },
     "milvus_host": {
         "description": "Milvus 服务主机",
         "type": "string",
         "default": "localhost",
-        "hint": " (仅当 vector_db_type 为 'milvus' 时有效)"
+        "hint": " (仅当 vector_db_type 为 'milvus' 时有效)",
+        "condition": {
+            "vector_db_type": "milvus"
+        }
     },
     "milvus_port": {
         "description": "Milvus 服务端口",
         "type": "string",
         "default": "19530",
-        "hint": "(仅当 vector_db_type 为 'milvus' 时有效)"
+        "hint": "(仅当 vector_db_type 为 'milvus' 时有效)",
+        "condition": {
+            "vector_db_type": "milvus"
+        }
     },
     "milvus_user": {
         "description": "Milvus 用户名",
         "type": "string",
         "default": "",
-        "hint": "(可选, 仅当 vector_db_type 为 'milvus' 时有效)"
+        "hint": "(可选, 仅当 vector_db_type 为 'milvus' 时有效)",
+        "condition": {
+            "vector_db_type": "milvus"
+        }
     },
     "milvus_password": {
         "description": "Milvus 密码",
         "type": "string",
         "default": "",
-        "hint": "(可选, 仅当 vector_db_type 为 'milvus' 时有效)"
+        "hint": "(可选, 仅当 vector_db_type 为 'milvus' 时有效)",
+        "condition": {
+            "vector_db_type": "milvus"
+        }
     },
     "faiss_db_subpath": {
         "description": "Faiss 索引存储子路径 ",
         "type": "string",
         "default": "faiss_data",
-        "hint": "(相对于持久化数据目录 'AstrBot/data/plugins_data/astrbot_plugin_knowledge_base/', 仅当 vector_db_type 为 'faiss' 时有效)"
+        "hint": "(相对于持久化数据目录 'AstrBot/data/plugins_data/astrbot_plugin_knowledge_base/', 仅当 vector_db_type 为 'faiss' 时有效)",
+        "condition": {
+            "vector_db_type": "faiss"
+        }
     },
     "milvus_lite_db_subpath": {
         "description": "Milvus Lite 数据文件子路径 ",
         "type": "string",
         "default": "milvus_lite_data/milvus_lite.db",
-        "hint": "(相对于持久化数据目录 'AstrBot/data/plugins_data/astrbot_plugin_knowledge_base/', 仅当 vector_db_type 为 'milvus_lite' 时有效)"
+        "hint": "(相对于持久化数据目录 'AstrBot/data/plugins_data/astrbot_plugin_knowledge_base/', 仅当 vector_db_type 为 'milvus_lite' 时有效)",
+        "condition": {
+            "vector_db_type": "milvus_lite"
+        }
     },
     "text_chunk_size": {
         "description": "文本分块大小 (字符数)",
