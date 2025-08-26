@@ -24,10 +24,9 @@ from .faiss_store import FaissStore as OldFaissStore
 
 # 定义默认的缓存大小
 DEFAULT_MAX_CACHE_SIZE = 3
-# 定义默认的并发批次数量限制，防止内存过度占用
-DEFAULT_MAX_CONCURRENT_BATCHES = 10
-# 定义任务分块处理的乘数，用于限制内存中并发任务对象的数量
-DEFAULT_TASK_CHUNK_SIZE_MULTIPLIER = 5
+# 定义内存管理相关常量
+DEFAULT_MEMORY_BATCH_SIZE = 50  # 内存中同时处理的文档数量
+MAX_DOCUMENTS_WARNING_THRESHOLD = 5000  # 大文件警告阈值
 
 
 def _check_pickle_file(file_path: str) -> bool:
@@ -88,7 +87,6 @@ class FaissStore(VectorDBBase):
         embedding_util: EmbeddingSolutionHelper,
         data_path: str,
         max_cache_size: int = DEFAULT_MAX_CACHE_SIZE,
-        max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT_BATCHES,
     ):
         super().__init__(embedding_util, data_path)
         # self.vecdbs: Dict[str, FaissVecDB] = {} # 被 cache 替代
@@ -101,16 +99,10 @@ class FaissStore(VectorDBBase):
         # 加载锁，防止同一集合并发加载
         self._locks: Dict[str, asyncio.Lock] = {}
         self.max_cache_size = max_cache_size
-        self.max_concurrent_batches = max_concurrent_batches
-        # 信号量控制并发批次数量
-        self._batch_semaphore = asyncio.Semaphore(max_concurrent_batches)
-        # 任务分块大小，限制内存中累积的待处理任务数量
-        self.task_chunk_size = (
-            self.max_concurrent_batches * DEFAULT_TASK_CHUNK_SIZE_MULTIPLIER
-        )
+        # 内存管理批次大小
+        self.memory_batch_size = DEFAULT_MEMORY_BATCH_SIZE
         logger.info(
-            f"FaissStore LRU Cache initialized with max_size={max_cache_size}, "
-            f"max_concurrent_batches={max_concurrent_batches}, task_chunk_size={self.task_chunk_size}"
+            f"[知识库-缓存] FaissStore LRU缓存初始化完成: 最大缓存大小={max_cache_size}, 内存批次大小={self.memory_batch_size}"
         )
         # ------------------------
 
@@ -121,11 +113,12 @@ class FaissStore(VectorDBBase):
 
     async def initialize(self):
         """初始化：仅扫描磁盘，不加载任何集合到内存"""
-        logger.info(f"初始化 Faiss 存储并扫描路径: {self.data_path}...")
+        logger.info(f"[知识库-初始化] 开始扫描Faiss存储路径: {self.data_path}")
         # 初始化时只扫描，不加载
         await self._scan_collections_on_disk()
         logger.info(
-            f"Faiss 存储扫描完成。发现新格式集合: {list(self._all_known_collections)}，旧格式集合: {list(self._old_collections.keys())}"
+            f"[知识库-初始化] 扫描完成 - 新格式集合: {len(self._all_known_collections)}个 {list(self._all_known_collections)}, "
+            f"旧格式集合: {len(self._old_collections)}个 {list(self._old_collections.keys())}"
         )
 
     def _get_collection_meta(self, collection_name: str) -> Tuple[str, str, str, str]:
@@ -212,14 +205,14 @@ class FaissStore(VectorDBBase):
             scanned_file_ids.add(file_id)
             if is_old:
                 self._old_collections[collection_name] = collection_name
-                logger.debug(f"发现旧格式集合: {collection_name} (file_id: {file_id})")
+                logger.debug(f"[知识库-扫描] 发现旧格式集合: {collection_name} (file_id: {file_id})")
             else:
                 self._all_known_collections.add(collection_name)
-                logger.debug(f"发现新格式集合: {collection_name} (file_id: {file_id})")
+                logger.debug(f"[知识库-扫描] 发现新格式集合: {collection_name} (file_id: {file_id})")
 
         # 如果发现了旧集合，初始化旧存储实例
         if self._old_collections and not self._old_faiss_store:
-            logger.info("发现旧格式集合，初始化 OldFaissStore...")
+            logger.info(f"[知识库-扫描] 检测到旧格式集合，初始化OldFaissStore处理器...")
             self._old_faiss_store = OldFaissStore(self.embedding_util, self.data_path)
             await self._old_faiss_store.initialize()
 
@@ -227,7 +220,7 @@ class FaissStore(VectorDBBase):
         self, collection_name: str, index_path: str, storage_path: str
     ) -> FaissVecDB:
         """执行实际的加载/创建 FaissVecDB 逻辑，不涉及缓存和锁"""
-        logger.info(f"开始加载/创建 Faiss 集合实例: '{collection_name}'")
+        logger.info(f"[知识库-加载] 开始加载/创建Faiss集合实例: '{collection_name}'")
         self.embedding_utils[collection_name] = AstrBotEmbeddingProviderWrapper(
             embedding_util=self.embedding_util,
             collection_name=collection_name,
@@ -242,7 +235,7 @@ class FaissStore(VectorDBBase):
             params["rerank_provider"] = rerank_prov
         vecdb = FaissVecDB(**params)
         await vecdb.initialize()
-        logger.info(f"Faiss 集合实例 '{collection_name}' 加载/创建完成。")
+        logger.info(f"[知识库-加载] Faiss集合实例 '{collection_name}' 加载/创建完成")
         return vecdb
 
     async def _evict_lru_if_needed(self):
@@ -252,21 +245,21 @@ class FaissStore(VectorDBBase):
             try:
                 lru_key, lru_vecdb = self.cache.popitem()
                 logger.info(
-                    f"缓存已满 (max={self.max_cache_size})。正在移出并关闭最少使用的集合: '{lru_key}'"
+                    f"[知识库-缓存] 缓存已满(max={self.max_cache_size})，移出最少使用的集合: '{lru_key}'"
                 )
                 self.embedding_utils.pop(lru_key, None)
                 self._locks.pop(lru_key, None)  # 清理锁
                 try:
                     await lru_vecdb.close()
-                    logger.info(f"已成功关闭被移出的集合: '{lru_key}'")
+                    logger.info(f"[知识库-缓存] 成功关闭被移出的集合: '{lru_key}'")
                     evicted_count += 1
                 except Exception as close_e:
-                    logger.error(f"关闭被移出的集合 '{lru_key}' 时发生错误: {close_e}")
+                    logger.error(f"[知识库-缓存] 关闭被移出的集合 '{lru_key}' 时发生错误: {close_e}")
             except KeyError:
                 # 缓存为空
                 break
             except Exception as e:
-                logger.error(f"缓存移出过程发生未知错误：{e}")
+                logger.error(f"[知识库-缓存] 缓存移出过程发生未知错误: {e}")
                 break
 
         # 如果有移出操作，触发垃圾回收
@@ -313,7 +306,7 @@ class FaissStore(VectorDBBase):
             if collection_name in self.cache:
                 return self.cache[collection_name]
 
-            logger.info(f"缓存未命中，准备加载集合: '{collection_name}'")
+            logger.info(f"[知识库-加载] 缓存未命中，准备加载集合: '{collection_name}'")
 
             _, _, index_path, storage_path, _ = self._get_collection_meta(
                 collection_name
@@ -323,7 +316,7 @@ class FaissStore(VectorDBBase):
             if not for_create and not (
                 os.path.exists(index_path) and os.path.exists(storage_path)
             ):
-                logger.warning(f"集合 '{collection_name}' 的文件不存在，无法加载。")
+                logger.warning(f"[知识库-加载] 警告: 集合 '{collection_name}' 的文件不存在，无法加载。索引文件: {index_path}, 存储文件: {storage_path}")
                 # self._locks.pop(collection_name, None) # 加载失败，清理锁
                 return None
 
@@ -339,11 +332,11 @@ class FaissStore(VectorDBBase):
                 self.cache[collection_name] = vecdb
                 self._all_known_collections.add(collection_name)  # 确保已记录
                 logger.info(
-                    f"集合 '{collection_name}' 已加载并放入缓存。当前缓存大小: {len(self.cache)}/{self.max_cache_size}"
+                    f"[知识库-加载] 集合 '{collection_name}' 已加载并放入缓存。当前缓存大小: {len(self.cache)}/{self.max_cache_size}"
                 )
                 return vecdb
             except Exception as e:
-                logger.error(f"加载知识库集合(FAISS) '{collection_name}' 时出错: {e}")
+                logger.error(f"[知识库-加载] 加载知识库集合(FAISS) '{collection_name}' 时出错: {type(e).__name__} - {str(e)}")
                 # 清理可能残留的状态
                 self.cache.pop(collection_name, None)
                 self.embedding_utils.pop(collection_name, None)
@@ -358,11 +351,11 @@ class FaissStore(VectorDBBase):
         """创建并加载一个新集合到缓存"""
         if await self.collection_exists(collection_name):
             # 如果已存在（在磁盘或旧存储中），尝试加载到缓存（如果还不在）
-            logger.info(f"Faiss 集合 '{collection_name}' 已存在。尝试加载到缓存。")
+            logger.info(f"[知识库-创建] Faiss集合 '{collection_name}' 已存在，尝试加载到缓存")
             await self._get_or_load_vecdb(collection_name)
             return
 
-        logger.info(f"开始创建新 Faiss 集合 '{collection_name}'...")
+        logger.info(f"[知识库-创建] 开始创建新Faiss集合 '{collection_name}'")
         # 保存偏好设置
         await self.embedding_util.user_prefs_handler.save_user_preferences()
 
@@ -374,9 +367,9 @@ class FaissStore(VectorDBBase):
             # 新创建的集合需要显式保存一下索引文件
             await vecdb.embedding_storage.save_index()
             # _get_or_load_vecdb 已经将其加入 _all_known_collections
-            logger.info(f"Faiss 集合 '{collection_name}' 创建成功并已加载到缓存。")
+            logger.info(f"[知识库-创建] Faiss集合 '{collection_name}' 创建成功并已加载到缓存")
         else:
-            logger.error(f"Faiss 集合 '{collection_name}' 创建或加载失败。")
+            logger.error(f"[知识库-创建] Faiss集合 '{collection_name}' 创建或加载失败")
 
     async def collection_exists(self, collection_name: str) -> bool:
         """检查集合是否存在于磁盘（新格式）或旧存储中"""
@@ -386,182 +379,207 @@ class FaissStore(VectorDBBase):
             or collection_name in self._old_collections
         )
 
-    async def _batch_process_task(
+    async def _process_documents_batch(
         self,
-        batch: ProcessingBatch,
+        documents: List[Document],
         collection_name: str,
         vecdb: FaissVecDB,
-    ) -> List[str]:
+    ) -> Tuple[List[str], int]:
         """
-        处理单个批次的任务，使用信号量控制并发。
-        注意：此实现逐个插入文档，因为 FaissVecDB.insert 是单个操作。
-        为了获得最佳性能，应在 FaissVecDB 中实现一个批量插入方法，
-        该方法接受文档列表和预先计算的嵌入向量列表，从而避免重复的嵌入计算和多次 I/O。
+        顺序处理一批文档，优化内存使用
+        返回: (成功添加的文档ID列表, 失败数量)
         """
-        async with self._batch_semaphore:  # 控制并发批次数量
-            if not vecdb:
-                logger.error(
-                    f"批处理失败：集合 '{collection_name}' 的 vecdb 实例为空。"
-                )
-                return []
+        if not vecdb:
+            logger.error(f"[知识库-批次处理] 致命错误: 集合 '{collection_name}' 的 vecdb 实例为空，无法处理文档")
+            return [], len(documents)
 
-            # 优化点 1: 批量获取嵌入向量 (如果 FaissVecDB 支持批量插入)
-            # texts = [doc.text_content for doc in batch.documents]
-            # embeddings = await vecdb.embedding_provider.get_embeddings(texts)
-            # await vecdb.add_batch(documents=batch.documents, embeddings=embeddings)
-
-            # 当前实现：逐个插入
-            all_doc_ids = []
+        doc_ids = []
+        failed_count = 0
+        batch_size = len(documents)
+        
+        logger.debug(f"[知识库-批次处理] 开始逐个处理 {batch_size} 个文档，集合: '{collection_name}'")
+        
+        for i, doc in enumerate(documents):
             try:
-                for doc in batch.documents:
-                    try:
-                        # 这是主要的性能瓶颈：每次插入都是一个独立的 embedding 请求和数据库写入。
-                        doc_id = await vecdb.insert(
-                            content=doc.text_content,
-                            metadata=doc.metadata,
-                        )
-                        all_doc_ids.append(doc_id)
-                    except Exception as e:
-                        excerpt = doc.text_content[:100].replace("\n", "")
-                        logger.error(
-                            f"向 Faiss 集合 '{collection_name}' 添加文档 '{excerpt}...' 时发生异常: {e}"
-                        )
-                        # 单个文档失败不应中断整个批次
-            finally:
-                # 强制清理批次中的文档引用，帮助垃圾回收
-                batch.documents.clear()
-                del batch
-            return all_doc_ids
+                # 获取文档预览用于日志
+                doc_preview = doc.text_content[:50].replace("\n", " ") if doc.text_content else "[空文档]"
+                
+                doc_id = await vecdb.insert(
+                    content=doc.text_content,
+                    metadata=doc.metadata,
+                )
+                doc_ids.append(doc_id)
+                
+                # 详细的进度日志（每10个文档记录一次）
+                if (i + 1) % 10 == 0 or (i + 1) == batch_size:
+                    logger.debug(f"[知识库-批次处理] 进度: {i+1}/{batch_size} 个文档已处理，最新: '{doc_preview}...'")
+                
+                # 及时清理文档引用以释放内存
+                doc.text_content = ""
+                doc.metadata.clear()
+                
+            except Exception as e:
+                failed_count += 1
+                excerpt = doc.text_content[:50].replace("\n", " ") if doc.text_content else "[空文档]"
+                logger.error(
+                    f"[知识库-批次处理] 文档处理失败: 第{i+1}/{batch_size}个文档 '{excerpt}...' 添加到集合 '{collection_name}' 失败，"
+                    f"错误类型: {type(e).__name__}，错误详情: {str(e)}"
+                )
+            
+            # 每处理一定数量的文档后触发垃圾回收
+            if (i + 1) % 20 == 0:
+                gc.collect()
+                logger.debug(f"[知识库-批次处理] 已处理 {i+1} 个文档，执行内存垃圾回收")
+                
+        # 清空整个批次的文档列表
+        documents.clear()
+        
+        if failed_count == 0:
+            logger.debug(f"[知识库-批次处理] ✅ 批次处理完成: 集合 '{collection_name}' 成功处理 {len(doc_ids)} 个文档")
+        else:
+            logger.warning(f"[知识库-批次处理] ⚠️ 批次处理完成: 集合 '{collection_name}' 成功 {len(doc_ids)} 个，失败 {failed_count} 个文档")
+            
+        return doc_ids, failed_count
 
     async def add_documents(
         self, collection_name: str, documents: List[Document]
     ) -> List[str]:
         """
-        向指定集合中添加文档。
-        此方法通过并发处理批次来优化速度，并通过分块提交任务来控制内存。
-        内存风险：整个 `documents` 列表会一次性加载到内存中。对于非常大的数据集，
-        调用者应考虑分块调用此方法。
+        向指定集合中添加文档，使用顺序处理优化内存使用
         """
-        # 首先处理旧集合
+        # 处理旧集合
         if collection_name in self._old_collections:
             if self._old_faiss_store:
+                logger.info(f"[知识库-添加文档] 检测到旧格式集合 '{collection_name}'，使用旧存储引擎处理")
                 return await self._old_faiss_store.add_documents(
                     collection_name, documents
                 )
             else:
-                logger.error(
-                    f"旧集合 '{collection_name}' 存在但 OldFaissStore 未初始化。"
-                )
+                logger.error(f"[知识库-添加文档] 致命错误: 旧集合 '{collection_name}' 存在但 OldFaissStore 未初始化，请检查插件配置")
                 return []
 
-        # 如果集合不存在（既不是旧的，也不在_all_known_collections），则创建它
-        # create_collection 内部会调用 _get_or_load_vecdb(..., for_create=True)
+        # 检查或创建集合
         if not await self.collection_exists(collection_name):
-            logger.warning(f"Faiss 集合 '{collection_name}' 不存在。将尝试自动创建。")
+            logger.info(f"[知识库-添加文档] 目标集合 '{collection_name}' 不存在，开始自动创建新集合")
             await self.create_collection(collection_name)
+        else:
+            logger.info(f"[知识库-添加文档] 目标集合 '{collection_name}' 已存在，准备添加文档")
 
-        # 获取（或加载/创建）集合实例
+        # 获取集合实例
         vecdb = await self._get_or_load_vecdb(collection_name)
-        # 检查 vecdb 是否成功获取
         if not vecdb:
-            logger.error(f"无法获取或加载集合 '{collection_name}'，添加文档失败。")
+            logger.error(f"[知识库-添加文档] 严重错误: 无法获取或加载集合 '{collection_name}' 的向量数据库实例，文档添加操作失败")
             return []
 
         total_documents = len(documents)
         if total_documents == 0:
+            logger.warning(f"[知识库-添加文档] 警告: 传入的文档列表为空，集合 '{collection_name}' 无需处理")
             return []
 
-        # 警告潜在的内存风险
-        if total_documents > 10000:  # 假设超过10000个文档可能导致高内存占用
+        # 内存使用警告和系统状态检查
+        if total_documents > MAX_DOCUMENTS_WARNING_THRESHOLD:
             logger.warning(
-                f"正在一次性处理 {total_documents} 个文档，可能会占用大量内存。建议分块上传。"
+                f"[知识库-添加文档] 内存警告: 准备一次性处理 {total_documents} 个文档 (超过阈值 {MAX_DOCUMENTS_WARNING_THRESHOLD})，"
+                f"建议分批上传以避免内存溢出。当前内存批次大小: {self.memory_batch_size}"
             )
 
-        num_batches = (total_documents + DEFAULT_BATCH_SIZE - 1) // DEFAULT_BATCH_SIZE
-        logger.info(
-            f"向 Faiss 集合 '{collection_name}' 添加 {total_documents} 个文档，分为 {num_batches} 个批次并发处理。"
-        )
+        logger.info(f"[知识库-添加文档] 开始处理: 集合='{collection_name}', 总文档数={total_documents}, 批次大小={self.memory_batch_size}")
+        
+        all_doc_ids = []
+        total_failed = 0
+        processed_count = 0
+        total_batches = (total_documents + self.memory_batch_size - 1) // self.memory_batch_size
 
-        tasks = []
-        all_doc_ids: List[str] = []
-        failed_batches_cnt = 0
+        # 分批顺序处理，避免内存激增
+        for i in range(0, total_documents, self.memory_batch_size):
+            batch_end = min(i + self.memory_batch_size, total_documents)
+            batch_documents = documents[i:batch_end]
+            batch_size = len(batch_documents)
+            current_batch = i // self.memory_batch_size + 1
+            
+            logger.info(f"[知识库-添加文档] 处理批次 {current_batch}/{total_batches}: 文档范围 {i+1}-{batch_end} (共{batch_size}个)")
+            
+            try:
+                batch_doc_ids, batch_failed = await self._process_documents_batch(
+                    batch_documents, collection_name, vecdb
+                )
+                
+                all_doc_ids.extend(batch_doc_ids)
+                total_failed += batch_failed
+                processed_count += batch_size
+                
+                success_in_batch = len(batch_doc_ids)
+                logger.info(f"[知识库-添加文档] 批次 {current_batch} 完成: 成功 {success_in_batch}/{batch_size}" + 
+                           (f", 失败 {batch_failed}" if batch_failed > 0 else ""))
+                
+                # 每处理几个批次后进行垃圾回收
+                if current_batch % 3 == 0:
+                    gc.collect()
+                    logger.debug(f"[知识库-添加文档] 批次 {current_batch} 后执行内存垃圾回收")
+                    
+            except Exception as e:
+                logger.error(f"[知识库-添加文档] 批次处理异常: 批次 {current_batch}/{total_batches} 发生严重错误，"
+                           f"影响文档数量 {batch_size}，错误详情: {str(e)}")
+                total_failed += batch_size
 
-        for i in range(num_batches):
-            start_idx = i * DEFAULT_BATCH_SIZE
-            end_idx = min(start_idx + DEFAULT_BATCH_SIZE, total_documents)
-            batch_docs = documents[start_idx:end_idx]
-            if not batch_docs:
-                continue
-
-            processing_batch = ProcessingBatch(documents=batch_docs)
-            task = asyncio.create_task(
-                self._batch_process_task(processing_batch, collection_name, vecdb)
-            )
-            tasks.append(task)
-
-            # 当任务数量达到分块大小，或这是最后一个批次时，处理这一块任务
-            if len(tasks) >= self.task_chunk_size or i == num_batches - 1:
-                logger.debug(f"处理任务块，数量: {len(tasks)}")
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"处理批次时发生未捕获的异常: {result}")
-                        failed_batches_cnt += 1
-                    elif not result:
-                        logger.warning("某个批次未成功添加任何文档。")
-                    else:
-                        all_doc_ids.extend(result)
-
-                # 清空任务列表以进行下一块处理
-                tasks = []
-
-        # 最终垃圾回收
-        gc.collect()
-
-        # 添加文档后保存索引
+        # 保存索引
         try:
+            logger.info(f"[知识库-添加文档] 开始保存集合 '{collection_name}' 的索引文件...")
             await vecdb.embedding_storage.save_index()
-            logger.info(f"集合 '{collection_name}' 索引已保存。")
+            logger.info(f"[知识库-添加文档] 集合 '{collection_name}' 索引文件保存成功")
         except Exception as e:
-            logger.error(f"保存集合 '{collection_name}' 索引时出错: {e}")
+            logger.error(f"[知识库-添加文档] 索引保存失败: 集合 '{collection_name}' 索引文件保存时发生错误，"
+                        f"可能影响后续搜索功能，错误详情: {str(e)}")
 
-        logger.info(
-            f"向 Faiss 集合 '{collection_name}' 完成添加操作。总共处理了 {total_documents} 个原始文档，成功添加 {len(all_doc_ids)} 个文档。"
-        )
-        if failed_batches_cnt > 0:
-            logger.warning(
-                f"其中 {failed_batches_cnt} 个批次处理异常或因重试失败被丢弃部分文档。"
-            )
+        # 最终清理和统计
+        documents.clear()
+        gc.collect()
+        
+        success_count = len(all_doc_ids)
+        success_rate = (success_count / total_documents * 100) if total_documents > 0 else 0
+        
+        if total_failed == 0:
+            logger.info(f"[知识库-添加文档] ✅ 任务完成: 集合 '{collection_name}' 成功添加 {success_count}/{total_documents} 个文档 (100%)")
+        else:
+            logger.warning(f"[知识库-添加文档] ⚠️ 任务完成(有失败): 集合 '{collection_name}' 成功 {success_count}/{total_documents} 个文档 "
+                          f"({success_rate:.1f}%), 失败 {total_failed} 个，请检查上方错误日志")
+        
         return all_doc_ids
 
     async def search(
         self, collection_name: str, query_text: str, top_k: int = 5
     ) -> List[Tuple[Document, float]]:
+        logger.info(f"[知识库-搜索] 开始搜索: 集合='{collection_name}', 查询文本预览='{query_text[:30]}...', top_k={top_k}")
+        
         if not await self.collection_exists(collection_name):
-            logger.warning(f"Faiss 集合 '{collection_name}' 不存在。")
+            logger.warning(f"[知识库-搜索] 警告: Faiss集合 '{collection_name}' 不存在，搜索结果为空")
             return []
 
         # 首先处理旧集合
         if collection_name in self._old_collections:
             if self._old_faiss_store:
+                logger.info(f"[知识库-搜索] 使用旧存储引擎处理集合 '{collection_name}' 的搜索")
                 return await self._old_faiss_store.search(
                     collection_name, query_text, top_k
                 )
             else:
                 logger.error(
-                    f"旧集合 '{collection_name}' 存在但 OldFaissStore 未初始化。"
+                    f"[知识库-搜索] 错误: 旧集合 '{collection_name}' 存在但 OldFaissStore 未初始化"
                 )
                 return []
 
         # 获取或加载集合实例
+        logger.debug(f"[知识库-搜索] 获取集合 '{collection_name}' 的向量数据库实例")
         vecdb = await self._get_or_load_vecdb(collection_name)
         if not vecdb:
-            logger.error(f"无法获取或加载集合 '{collection_name}'，搜索失败。")
+            logger.error(f"[知识库-搜索] 错误: 无法获取或加载集合 '{collection_name}' 的向量数据库实例，搜索失败")
             return []
 
         try:
-            if vecdb.rerank_provider:
+            # 检查是否使用重排序
+            use_rerank = vecdb.rerank_provider is not None
+            if use_rerank:
+                logger.debug(f"[知识库-搜索] 使用重排序模式搜索，初始检索数量: {max(20, top_k)}")
                 results = await vecdb.retrieve(
                     query=query_text,
                     k=max(20, top_k),
@@ -569,20 +587,26 @@ class FaissStore(VectorDBBase):
                 )
                 results = results[:top_k]
             else:
+                logger.debug(f"[知识库-搜索] 使用普通模式搜索，检索数量: {top_k}")
                 results = await vecdb.retrieve(query=query_text, k=top_k, rerank=False)
+                
         except Exception as e:
-            logger.error(f"在集合 '{collection_name}' 中搜索时发生错误: {e}")
+            logger.error(f"[知识库-搜索] 搜索异常: 在集合 '{collection_name}' 中搜索时发生错误，"
+                        f"错误类型: {type(e).__name__}，错误详情: {str(e)}")
             return []
 
+        # 处理搜索结果
         ret = []
-        for result in results:
+        failed_parse_count = 0
+        for i, result in enumerate(results):
             if result is not None:
                 try:
                     metadata = json.loads(result.data.get("metadata", "{}"))
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as json_e:
+                    failed_parse_count += 1
                     metadata = {}
                     logger.warning(
-                        f"集合 {collection_name} 文档 {result.data.get('doc_id')} 元数据JSON解析失败。"
+                        f"[知识库-搜索] JSON解析失败: 集合 {collection_name} 文档 {result.data.get('doc_id')} 元数据解析失败，错误: {str(json_e)}"
                     )
                 doc = Document(
                     id=result.data.get("doc_id"),
@@ -591,9 +615,17 @@ class FaissStore(VectorDBBase):
                     metadata=metadata,
                 )
                 ret.append((doc, result.similarity))
-        logger.info(
-            f"Faiss 集合 '{collection_name}' 搜索完成。查询文本: '{query_text[:50]}...'，返回 {len(ret)} 个结果。"
-        )
+                
+        # 详细的搜索结果日志
+        if len(ret) == 0:
+            logger.warning(f"[知识库-搜索] 搜索结果为空: 集合 '{collection_name}' 中未找到与查询 '{query_text[:30]}...' 相关的内容")
+        else:
+            avg_similarity = sum(score for _, score in ret) / len(ret)
+            logger.info(
+                f"[知识库-搜索] ✓ 搜索完成: 集合='{collection_name}', 查询='{query_text[:30]}...', "
+                f"返回结果数={len(ret)}, 平均相似度={avg_similarity:.3f}"
+                + (f", JSON解析失败={failed_parse_count}个" if failed_parse_count > 0 else "")
+            )
         return ret
 
     async def delete_collection(self, collection_name: str) -> bool:

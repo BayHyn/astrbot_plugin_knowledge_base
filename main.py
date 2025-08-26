@@ -3,6 +3,8 @@ import os
 import asyncio
 from typing import Optional
 
+from packaging import version
+
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -22,7 +24,7 @@ from .utils.text_splitter import TextSplitterUtil
 from .utils.file_parser import FileParser, LLM_Config
 from .vector_store.base import VectorDBBase
 
-if VERSION < "3.5.13":
+if version.parse(VERSION) < version.parse("3.5.13"):
     logger.info("建议升级至 AstrBot v3.5.13 或更高版本。")
     from .vector_store.faiss_store import FaissStore
 else:
@@ -44,7 +46,7 @@ from .commands import (
     constants.PLUGIN_REGISTER_NAME,
     "lxfight",
     "一个支持多种向量数据库的知识库插件",
-    "0.5.4",
+    "0.5.9",
     "https://github.com/lxfight/astrbot_plugin_knowledge_base",
 )
 class KnowledgeBasePlugin(Star):
@@ -60,6 +62,9 @@ class KnowledgeBasePlugin(Star):
         self.user_prefs_handler: Optional[UserPrefsHandler] = None
 
         ensure_vector_db_dependencies(self.config.get("vector_db_type", "faiss"))
+        
+        # 标记初始化状态
+        self.initialization_complete = False
         self.init_task = asyncio.create_task(self._initialize_components())
 
     def _initialize_basic_paths(self):
@@ -105,7 +110,8 @@ class KnowledgeBasePlugin(Star):
                 logger.warning(f"嵌入服务适配器插件加载失败: {e}", exc_info=True)
                 self.embedding_util = None  # Fallback
 
-            if self.embedding_util is None:  # If adapter failed or not found
+            # 如果 embedding adapter 插件加载失败或未找到，使用备用配置
+            if self.embedding_util is None:
                 embedding_util = EmbeddingUtil(
                     api_url=self.config.get("embedding_api_url"),
                     api_key=self.config.get("embedding_api_key"),
@@ -191,17 +197,27 @@ class KnowledgeBasePlugin(Star):
                 )
 
             logger.info("知识库插件初始化成功。")
+            self.initialization_complete = True
 
         except Exception as e:
-            print("出现问题")
             logger.error(f"知识库插件初始化失败: {e}", exc_info=True)
             self.vector_db = None
+            self.initialization_complete = False
 
     async def _ensure_initialized(self) -> bool:
-        if self.init_task and not self.init_task.done():
-            await self.init_task
+        """确保插件已完全初始化，如果未初始化则等待初始化完成"""
+        if not self.initialization_complete:
+            if self.init_task and not self.init_task.done():
+                try:
+                    await self.init_task
+                except Exception as e:
+                    logger.error(f"等待初始化完成时发生错误: {e}", exc_info=True)
+                    return False
+        
+        # 检查关键组件是否都已正确初始化
         if (
-            not self.vector_db
+            not self.initialization_complete
+            or not self.vector_db
             or not self.embedding_util
             or not self.text_splitter
             or not self.user_prefs_handler
@@ -337,7 +353,7 @@ class KnowledgeBasePlugin(Star):
     @kb_group.command("create", alias={"创建"})
     async def kb_create_collection(self, event: AstrMessageEvent, collection_name: str):
         """创建一个新的知识库"""
-        if VERSION >= "3.5.13":
+        if version.parse(VERSION) >= version.parse("3.5.13"):
             yield event.plain_result("请在 WebUI 中使用知识库创建功能。")
             return
         if not await self._ensure_initialized():
@@ -483,11 +499,14 @@ class KnowledgeBasePlugin(Star):
 
         if (
             self.embedding_util
-            and hasattr(self.embedding_util, "close")
-            and not isinstance(self.embedding_util, Star)
+            and hasattr(self.embedding_util, 'curr_embedding_util')
+            and hasattr(self.embedding_util.curr_embedding_util, 'client')
         ):
-            await self.embedding_util.close()
-            logger.info("Embedding 工具已关闭。")
+            try:
+                await self.embedding_util.curr_embedding_util.client.close()
+                logger.info("Embedding 工具已关闭。")
+            except Exception as e:
+                logger.warning(f"关闭 Embedding 工具时出错: {e}")
 
         if self.vector_db:
             await self.vector_db.close()
