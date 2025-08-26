@@ -587,16 +587,33 @@ class FaissStore(VectorDBBase):
                 logger.debug(f"[知识库-搜索] FaissVecDB没有rerank_provider属性，使用普通搜索模式")
                 
             if use_rerank:
+                # 对于有重排序的情况，先检索更多结果再重排序
                 logger.debug(f"[知识库-搜索] 使用重排序模式搜索，初始检索数量: {max(20, top_k)}")
                 results = await vecdb.retrieve(
                     query=query_text,
-                    k=max(20, top_k),
-                    rerank=True,
+                    k=max(20, top_k)
                 )
-                results = results[:top_k]
+                # 手动重排序（如果有重排序提供商的话）
+                if hasattr(vecdb, 'rerank_provider') and vecdb.rerank_provider:
+                    try:
+                        # 提取文档文本用于重排序
+                        documents = [result.data.get("text", "") for result in results if result]
+                        reranked_results = await vecdb.rerank_provider.rerank(query_text, documents)
+                        # 重新排序结果
+                        if reranked_results:
+                            reranked_indices = [item.index for item in reranked_results[:top_k]]
+                            results = [results[i] for i in reranked_indices if i < len(results)]
+                        else:
+                            results = results[:top_k]
+                        logger.debug(f"[知识库-搜索] 重排序完成，最终结果数量: {len(results)}")
+                    except Exception as rerank_e:
+                        logger.warning(f"[知识库-搜索] 重排序失败，使用原始结果: {str(rerank_e)}")
+                        results = results[:top_k]
+                else:
+                    results = results[:top_k]
             else:
                 logger.debug(f"[知识库-搜索] 使用普通模式搜索，检索数量: {top_k}")
-                results = await vecdb.retrieve(query=query_text, k=top_k, rerank=False)
+                results = await vecdb.retrieve(query=query_text, k=top_k)
                 
         except Exception as e:
             logger.error(f"[知识库-搜索] 搜索异常: 在集合 '{collection_name}' 中搜索时发生错误，"
