@@ -576,8 +576,16 @@ class FaissStore(VectorDBBase):
             return []
 
         try:
-            # 检查是否使用重排序
-            use_rerank = vecdb.rerank_provider is not None
+            # 安全地检查是否使用重排序，记录调试信息
+            has_rerank_attr = hasattr(vecdb, 'rerank_provider')
+            if has_rerank_attr:
+                rerank_provider_value = getattr(vecdb, 'rerank_provider', None)
+                use_rerank = rerank_provider_value is not None
+                logger.debug(f"[知识库-搜索] FaissVecDB有rerank_provider属性，值: {rerank_provider_value is not None}")
+            else:
+                use_rerank = False
+                logger.debug(f"[知识库-搜索] FaissVecDB没有rerank_provider属性，使用普通搜索模式")
+                
             if use_rerank:
                 logger.debug(f"[知识库-搜索] 使用重排序模式搜索，初始检索数量: {max(20, top_k)}")
                 results = await vecdb.retrieve(
