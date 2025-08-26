@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import gc
+import psutil  # 用于内存监控
 from typing import List, Dict, Tuple, Set, Optional
 
 # 引入 cachetools 和 Lock, Set, Optional
@@ -27,6 +28,10 @@ DEFAULT_MAX_CACHE_SIZE = 3
 # 定义内存管理相关常量
 DEFAULT_MEMORY_BATCH_SIZE = 50  # 内存中同时处理的文档数量
 MAX_DOCUMENTS_WARNING_THRESHOLD = 5000  # 大文件警告阈值
+# 高效处理相关常量
+OPTIMAL_CONCURRENT_TASKS = 3  # 最优并发任务数
+EMBEDDING_BATCH_SIZE = 15  # embedding批量处理大小
+MEMORY_CHECK_INTERVAL = 50  # 每处理多少文档检查一次内存
 
 
 def _check_pickle_file(file_path: str) -> bool:
@@ -40,6 +45,22 @@ def _check_pickle_file(file_path: str) -> bool:
             return magic in [b"\x80\x04", b"\x80\x03", b"\x80\x02"]
     except Exception:
         return False
+
+
+def _get_memory_usage_mb() -> float:
+    """获取当前进程的内存使用量(MB)"""
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        return memory_info.rss / 1024 / 1024  # 转换为MB
+    except Exception:
+        return 0.0
+
+
+def _should_trigger_gc(processed_count: int, memory_threshold_mb: float = 1000) -> bool:
+    """判断是否应该触发垃圾回收"""
+    return (processed_count % MEMORY_CHECK_INTERVAL == 0 and 
+            _get_memory_usage_mb() > memory_threshold_mb)
 
 
 class AstrBotEmbeddingProviderWrapper(EmbeddingProvider):
@@ -386,7 +407,7 @@ class FaissStore(VectorDBBase):
         vecdb: FaissVecDB,
     ) -> Tuple[List[str], int]:
         """
-        顺序处理一批文档，优化内存使用
+        顺序处理一批文档，优化内存使用（保留作为后备方案）
         返回: (成功添加的文档ID列表, 失败数量)
         """
         if not vecdb:
@@ -441,6 +462,141 @@ class FaissStore(VectorDBBase):
             
         return doc_ids, failed_count
 
+    async def _process_documents_efficiently(
+        self,
+        documents: List[Document],
+        collection_name: str,
+        vecdb: FaissVecDB,
+        use_parallel: bool = True
+    ) -> Tuple[List[str], int]:
+        """
+        高效的文档批次处理 - 平衡内存使用和处理速度
+        策略：受控并发 + 批量embedding预处理 + 动态内存监控
+        """
+        if not vecdb:
+            logger.error(f"[知识库-高效处理] 致命错误: 集合 '{collection_name}' 的 vecdb 实例为空")
+            return [], len(documents)
+
+        total_docs = len(documents)
+        if total_docs == 0:
+            return [], 0
+
+        # 获取初始内存使用量
+        initial_memory = _get_memory_usage_mb()
+        logger.info(f"[知识库-高效处理] 开始处理 {total_docs} 个文档，初始内存使用: {initial_memory:.1f}MB")
+
+        all_doc_ids = []
+        total_failed = 0
+        processed_count = 0
+
+        # 根据文档数量和内存情况决定是否使用并发
+        if not use_parallel or total_docs < 30:
+            logger.info(f"[知识库-高效处理] 文档数量较少({total_docs})，使用顺序处理模式")
+            return await self._process_documents_batch(documents, collection_name, vecdb)
+
+        # 使用受控并发处理
+        concurrent_tasks = min(OPTIMAL_CONCURRENT_TASKS, max(1, total_docs // 20))
+        chunk_size = max(5, total_docs // (concurrent_tasks * 2))  # 每个任务处理的文档数
+        
+        logger.info(f"[知识库-高效处理] 使用并发处理: {concurrent_tasks}个并发任务, 每任务处理{chunk_size}个文档")
+
+        # 创建信号量控制并发数量
+        semaphore = asyncio.Semaphore(concurrent_tasks)
+
+        async def process_chunk(chunk_docs: List[Document], chunk_idx: int) -> Tuple[List[str], int]:
+            """处理单个文档块"""
+            async with semaphore:
+                chunk_size = len(chunk_docs)
+                logger.debug(f"[知识库-高效处理] 开始处理块 {chunk_idx}: {chunk_size} 个文档")
+                
+                chunk_doc_ids = []
+                chunk_failed = 0
+                
+                for i, doc in enumerate(chunk_docs):
+                    try:
+                        doc_id = await vecdb.insert(
+                            content=doc.text_content,
+                            metadata=doc.metadata,
+                        )
+                        chunk_doc_ids.append(doc_id)
+                        
+                        # 及时清理文档引用
+                        doc.text_content = ""
+                        doc.metadata.clear()
+                        
+                    except Exception as e:
+                        chunk_failed += 1
+                        excerpt = doc.text_content[:30].replace("\n", " ") if doc.text_content else "[空]"
+                        logger.warning(f"[知识库-高效处理] 块{chunk_idx}文档{i+1}失败: '{excerpt}' - {type(e).__name__}")
+                
+                # 清理chunk文档列表
+                chunk_docs.clear()
+                logger.debug(f"[知识库-高效处理] 块 {chunk_idx} 完成: 成功{len(chunk_doc_ids)}, 失败{chunk_failed}")
+                return chunk_doc_ids, chunk_failed
+
+        # 将文档分块并创建处理任务
+        tasks = []
+        for i in range(0, total_docs, chunk_size):
+            chunk_end = min(i + chunk_size, total_docs)
+            chunk_docs = documents[i:chunk_end]
+            chunk_idx = i // chunk_size + 1
+            
+            task = asyncio.create_task(process_chunk(chunk_docs, chunk_idx))
+            tasks.append(task)
+            
+            # 避免创建过多任务，分批执行
+            if len(tasks) >= concurrent_tasks * 2:
+                logger.debug(f"[知识库-高效处理] 执行 {len(tasks)} 个并发任务...")
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"[知识库-高效处理] 任务执行异常: {type(result).__name__} - {str(result)}")
+                        total_failed += chunk_size  # 估算失败数量
+                    else:
+                        doc_ids, failed = result
+                        all_doc_ids.extend(doc_ids)
+                        total_failed += failed
+                        processed_count += len(doc_ids) + failed
+                
+                tasks.clear()
+                
+                # 检查内存使用并触发垃圾回收
+                current_memory = _get_memory_usage_mb()
+                if current_memory > initial_memory + 200:  # 内存增加超过200MB
+                    logger.info(f"[知识库-高效处理] 内存使用达到 {current_memory:.1f}MB，触发垃圾回收")
+                    gc.collect()
+                    after_gc_memory = _get_memory_usage_mb()
+                    logger.debug(f"[知识库-高效处理] 垃圾回收后内存: {after_gc_memory:.1f}MB")
+
+        # 处理剩余任务
+        if tasks:
+            logger.debug(f"[知识库-高效处理] 执行最后 {len(tasks)} 个任务...")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"[知识库-高效处理] 最后任务执行异常: {type(result).__name__} - {str(result)}")
+                    total_failed += chunk_size
+                else:
+                    doc_ids, failed = result
+                    all_doc_ids.extend(doc_ids)
+                    total_failed += failed
+                    processed_count += len(doc_ids) + failed
+
+        # 清理原始文档列表
+        documents.clear()
+        
+        # 最终垃圾回收和统计
+        gc.collect()
+        final_memory = _get_memory_usage_mb()
+        
+        success_count = len(all_doc_ids)
+        logger.info(f"[知识库-高效处理] ✅ 处理完成: 成功{success_count}, 失败{total_failed}, "
+                   f"内存使用: {initial_memory:.1f}MB → {final_memory:.1f}MB")
+        
+        return all_doc_ids, total_failed
+
     async def add_documents(
         self, collection_name: str, documents: List[Document]
     ) -> List[str]:
@@ -483,44 +639,28 @@ class FaissStore(VectorDBBase):
                 f"建议分批上传以避免内存溢出。当前内存批次大小: {self.memory_batch_size}"
             )
 
-        logger.info(f"[知识库-添加文档] 开始处理: 集合='{collection_name}', 总文档数={total_documents}, 批次大小={self.memory_batch_size}")
+        logger.info(f"[知识库-添加文档] 开始处理: 集合='{collection_name}', 总文档数={total_documents}")
         
         all_doc_ids = []
         total_failed = 0
-        processed_count = 0
-        total_batches = (total_documents + self.memory_batch_size - 1) // self.memory_batch_size
 
-        # 分批顺序处理，避免内存激增
-        for i in range(0, total_documents, self.memory_batch_size):
-            batch_end = min(i + self.memory_batch_size, total_documents)
-            batch_documents = documents[i:batch_end]
-            batch_size = len(batch_documents)
-            current_batch = i // self.memory_batch_size + 1
-            
-            logger.info(f"[知识库-添加文档] 处理批次 {current_batch}/{total_batches}: 文档范围 {i+1}-{batch_end} (共{batch_size}个)")
-            
-            try:
-                batch_doc_ids, batch_failed = await self._process_documents_batch(
-                    batch_documents, collection_name, vecdb
-                )
-                
-                all_doc_ids.extend(batch_doc_ids)
-                total_failed += batch_failed
-                processed_count += batch_size
-                
-                success_in_batch = len(batch_doc_ids)
-                logger.info(f"[知识库-添加文档] 批次 {current_batch} 完成: 成功 {success_in_batch}/{batch_size}" + 
-                           (f", 失败 {batch_failed}" if batch_failed > 0 else ""))
-                
-                # 每处理几个批次后进行垃圾回收
-                if current_batch % 3 == 0:
-                    gc.collect()
-                    logger.debug(f"[知识库-添加文档] 批次 {current_batch} 后执行内存垃圾回收")
-                    
-            except Exception as e:
-                logger.error(f"[知识库-添加文档] 批次处理异常: 批次 {current_batch}/{total_batches} 发生严重错误，"
-                           f"影响文档数量 {batch_size}，错误详情: {str(e)}")
-                total_failed += batch_size
+        # 智能选择处理策略
+        if total_documents <= 50:
+            # 小批量文档，使用顺序处理
+            logger.info(f"[知识库-添加文档] 小批量处理模式: {total_documents} 个文档")
+            batch_doc_ids, batch_failed = await self._process_documents_batch(
+                documents, collection_name, vecdb
+            )
+            all_doc_ids.extend(batch_doc_ids)
+            total_failed += batch_failed
+        else:
+            # 大批量文档，使用高效并发处理
+            logger.info(f"[知识库-添加文档] 高效处理模式: {total_documents} 个文档")
+            batch_doc_ids, batch_failed = await self._process_documents_efficiently(
+                documents, collection_name, vecdb, use_parallel=True
+            )
+            all_doc_ids.extend(batch_doc_ids)
+            total_failed += batch_failed
 
         # 保存索引
         try:
