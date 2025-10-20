@@ -35,6 +35,9 @@ class EmbeddingUtil:
         if not text or not text.strip():
             logger.warning("输入文本为空或仅包含空白，无法获取 embedding。")
             return None
+
+        logger.debug(f"开始为文本生成 embedding，长度: {len(text)} chars, 内容: '{text[:50]}...'")
+
         try:
             response = await self.client.embeddings.create(
                 input=text, model=self.model_name
@@ -44,7 +47,9 @@ class EmbeddingUtil:
                 and len(response.data) > 0
                 and hasattr(response.data[0], "embedding")
             ):
-                return response.data[0].embedding
+                embedding = response.data[0].embedding
+                logger.debug(f"成功生成 embedding，向量维度: {len(embedding)}")
+                return embedding
             else:
                 logger.error(
                     f"获取 Embedding 失败，OpenAI API 响应格式不正确或数据为空: {response}"
@@ -80,6 +85,8 @@ class EmbeddingUtil:
             logger.info("输入文本列表为空，返回空 embedding 列表。")
             return []
 
+        logger.info(f"开始批量生成 embedding，共 {len(texts)} 个文本")
+
         # 预处理输入：记录有效文本及其原始索引，过滤空或纯空白字符串
         valid_texts_with_indices: List[Tuple[int, str]] = []
         for i, text in enumerate(texts):
@@ -94,18 +101,26 @@ class EmbeddingUtil:
             logger.info("输入文本列表所有文本均为空或无效，返回相应数量的 None。")
             return [None] * len(texts)
 
+        logger.debug(f"有效文本数量: {len(valid_texts_with_indices)}/{len(texts)}")
+
         # 初始化结果列表，长度与输入文本列表一致，初始值为 None
         final_embeddings: List[Optional[List[float]]] = [None] * len(texts)
 
         # 设置每批次大小为 10
         batch_size = 10
-        # actual_texts_to_embed = [item[1] for item in valid_texts_with_indices]
+        total_batches = (len(valid_texts_with_indices) + batch_size - 1) // batch_size
+        logger.info(f"将分 {total_batches} 个批次处理，每批最多 {batch_size} 个文本")
 
         # 分批处理文本
         for batch_start in range(0, len(valid_texts_with_indices), batch_size):
             batch_end = min(batch_start + batch_size, len(valid_texts_with_indices))
             batch_indices_texts = valid_texts_with_indices[batch_start:batch_end]
             batch_texts = [text for _, text in batch_indices_texts]
+            batch_num = batch_start // batch_size + 1
+
+            logger.debug(
+                f"处理批次 {batch_num}/{total_batches}，包含 {len(batch_texts)} 个文本"
+            )
 
             try:
                 response = await self.client.embeddings.create(
@@ -118,12 +133,16 @@ class EmbeddingUtil:
                     for idx, (original_idx, _) in enumerate(batch_indices_texts):
                         final_embeddings[original_idx] = embeddings_for_batch[idx]
 
+                    logger.debug(
+                        f"批次 {batch_num} 成功生成 {len(embeddings_for_batch)} 个 embedding"
+                    )
+
                     # 内存优化：及时清理批次数据
                     del embeddings_for_batch
                     del response
                 else:
                     logger.error(
-                        f"批次 {batch_start // batch_size + 1} 获取 Embeddings 失败："
+                        f"批次 {batch_num} 获取 Embeddings 失败："
                         f"API 响应的数据项数量 ({len(response.data) if response.data else 0}) "
                         f"与输入文本数量 ({len(batch_texts)}) 不匹配。"
                     )
@@ -135,41 +154,47 @@ class EmbeddingUtil:
                 del batch_indices_texts
 
                 # 每5个批次触发一次垃圾回收
-                if (batch_start // batch_size + 1) % 5 == 0:
+                if batch_num % 5 == 0:
                     gc.collect()
+                    logger.debug(f"已处理 {batch_num} 个批次，触发垃圾回收")
 
             except APIStatusError as e:
                 logger.error(
-                    f"批次 {batch_start // batch_size + 1} 获取 Embeddings API 请求失败 "
+                    f"批次 {batch_num} 获取 Embeddings API 请求失败 "
                     f"(OpenAI Status Error)，状态码: {e.status_code}, 类型: {e.type}, "
                     f"参数: {e.param}, 消息: {e.message}"
                 )
                 continue
             except APIConnectionError as e:
                 logger.error(
-                    f"批次 {batch_start // batch_size + 1} 获取 Embeddings API 连接失败 "
+                    f"批次 {batch_num} 获取 Embeddings API 连接失败 "
                     f"(OpenAI Connection Error): {e}"
                 )
                 continue
             except RateLimitError as e:
                 logger.error(
-                    f"批次 {batch_start // batch_size + 1} 获取 Embeddings API 请求达到速率限制 "
+                    f"批次 {batch_num} 获取 Embeddings API 请求达到速率限制 "
                     f"(OpenAI RateLimit Error): {e}"
                 )
                 continue
             except APIError as e:
                 logger.error(
-                    f"批次 {batch_start // batch_size + 1} 获取 Embeddings 时发生 OpenAI API 错误: {e}"
+                    f"批次 {batch_num} 获取 Embeddings 时发生 OpenAI API 错误: {e}"
                 )
                 continue
             except Exception as e:
                 logger.error(
-                    f"批次 {batch_start // batch_size + 1} 获取 Embeddings 时发生未知错误: {e}",
+                    f"批次 {batch_num} 获取 Embeddings 时发生未知错误: {e}",
                     exc_info=True,
                 )
                 continue
 
         # 检查是否所有有效文本都未能生成嵌入
+        successful_count = sum(1 for emb in final_embeddings if emb is not None)
+        logger.info(
+            f"批量 embedding 生成完成，成功: {successful_count}/{len(texts)}，失败: {len(texts) - successful_count}"
+        )
+
         if all(embedding is None for embedding in final_embeddings):
             logger.error("所有批次均未能成功生成嵌入，请检查 API 配置或网络连接。")
 

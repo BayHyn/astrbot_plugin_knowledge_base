@@ -288,12 +288,18 @@ class FaissStore(VectorDBBase):
             logger.warning(f"Faiss 集合 '{collection_name}' 不存在。")
             return []
 
+        logger.debug(
+            f"开始在 Faiss 集合 '{collection_name}' 中搜索，查询: '{query_text[:50]}...', top_k={top_k}"
+        )
+
         query_embedding = await self.embedding_util.get_embedding_async(
             query_text, collection_name
         )
         if query_embedding is None:
             logger.error("无法为查询文本生成 embedding。")
             return []
+
+        logger.debug(f"查询文本的 embedding 向量维度: {len(query_embedding)}")
 
         def _search_sync():
             index = self.indexes[collection_name]
@@ -303,6 +309,8 @@ class FaissStore(VectorDBBase):
                 logger.info(f"Faiss 集合 '{collection_name}' 为空，无法搜索。")
                 return []
 
+            logger.debug(f"集合 '{collection_name}' 中共有 {index.ntotal} 个文档")
+
             query_embedding_np = np.array([query_embedding]).astype("float32")
             faiss.normalize_L2(query_embedding_np)
 
@@ -310,7 +318,14 @@ class FaissStore(VectorDBBase):
             if actual_top_k == 0:
                 return []
 
+            logger.debug(f"实际搜索 top_k={actual_top_k} (请求={top_k}, 文档总数={index.ntotal})")
+
             distances, indices = index.search(query_embedding_np, actual_top_k)
+
+            logger.debug(
+                f"Faiss 搜索完成，返回 {len(indices[0])} 个结果。"
+                f"距离范围: [{distances[0].min():.4f}, {distances[0].max():.4f}]"
+            )
 
             results = []
             for i in range(len(indices[0])):
@@ -319,8 +334,14 @@ class FaissStore(VectorDBBase):
                 if 0 <= doc_index < len(storage):
                     similarity_score = 1.0 - (dist / 2.0)
                     results.append((storage[doc_index], float(similarity_score)))
+                    logger.debug(
+                        f"结果 #{i+1}: 文档索引={doc_index}, 距离={dist:.4f}, "
+                        f"相似度={similarity_score:.4f}, 内容='{storage[doc_index].text_content[:30]}...'"
+                    )
                 else:
                     logger.warning(f"搜索结果中的索引 {doc_index} 超出范围。")
+
+            logger.info(f"从集合 '{collection_name}' 中成功检索到 {len(results)} 个文档")
             return results
 
         return await asyncio.to_thread(_search_sync)

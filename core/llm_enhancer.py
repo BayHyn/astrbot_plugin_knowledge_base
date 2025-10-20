@@ -97,6 +97,12 @@ async def enhance_request_with_kb(
     )
     min_similarity_score = llm_rag_config.get("min_similarity_score", 0.5)
 
+    logger.debug(
+        f"RAG 配置: search_top_k={kb_search_top_k}, "
+        f"insertion_method={kb_insertion_method}, "
+        f"min_similarity_score={min_similarity_score}"
+    )
+
     user_query = req.prompt
     if not user_query or not user_query.strip():
         logger.debug("用户查询为空，跳过知识库搜索。")
@@ -122,17 +128,24 @@ async def enhance_request_with_kb(
         )
         return
 
+    logger.debug(f"从知识库检索到 {len(search_results)} 个文档，开始过滤和格式化...")
+
     retrieved_contexts_list = []
-    for doc, score in search_results:
+    for idx, (doc, score) in enumerate(search_results):
+        logger.debug(
+            f"文档 #{idx+1}: 相关度={score:.4f}, 来源={doc.metadata.get('source', '未知')}, "
+            f"内容预览='{doc.text_content[:50]}...'"
+        )
         if score >= min_similarity_score:
             source_info = doc.metadata.get("source", "未知来源")
             context_item = (
                 f"- 内容: {doc.text_content} (来源: {source_info}, 相关度: {score:.2f})"
             )
             retrieved_contexts_list.append(context_item)
+            logger.debug(f"文档 #{idx+1} 通过相似度过滤 (>= {min_similarity_score})")
         else:
             logger.debug(
-                f"文档 '{doc.text_content[:30]}...' 相关度 {score:.2f} 低于阈值 {min_similarity_score}，已忽略。"
+                f"文档 #{idx+1} '{doc.text_content[:30]}...' 相关度 {score:.2f} 低于阈值 {min_similarity_score}，已忽略。"
             )
 
     if not retrieved_contexts_list:
@@ -141,19 +154,26 @@ async def enhance_request_with_kb(
         )
         return
 
+    logger.info(
+        f"共有 {len(retrieved_contexts_list)}/{len(search_results)} 个文档通过相似度过滤，准备注入到 LLM 请求中"
+    )
+
     formatted_contexts = "\n".join(retrieved_contexts_list)
     knowledge_to_insert = kb_context_template.format(
         retrieved_contexts=formatted_contexts
     )
 
     max_kb_insert_length = llm_rag_config.get("max_insert_length", 200000)
-    if len(knowledge_to_insert) > max_kb_insert_length:
+    original_length = len(knowledge_to_insert)
+    if original_length > max_kb_insert_length:
         logger.warning(
-            f"知识库插入内容过长 ({len(knowledge_to_insert)} chars)，将被截断至 {max_kb_insert_length} chars。"
+            f"知识库插入内容过长 ({original_length} chars)，将被截断至 {max_kb_insert_length} chars。"
         )
         knowledge_to_insert = (
             knowledge_to_insert[:max_kb_insert_length] + "\n... [内容已截断]"
         )
+    else:
+        logger.debug(f"知识库内容长度: {original_length} chars (未超过限制 {max_kb_insert_length})")
 
     knowledge_to_insert = f"{KB_START_MARKER}\n{knowledge_to_insert}\n{KB_END_MARKER}"
 
@@ -163,13 +183,19 @@ async def enhance_request_with_kb(
         else:
             req.system_prompt = knowledge_to_insert
         logger.info(
-            f"知识库内容已添加到 system_prompt。长度: {len(knowledge_to_insert)}"
+            f"知识库内容已添加到 system_prompt。最终长度: {len(req.system_prompt)} chars, "
+            f"知识库部分: {len(knowledge_to_insert)} chars"
         )
     elif kb_insertion_method == "prepend_prompt":
+        original_prompt = req.prompt
         req.prompt = (
             f"{knowledge_to_insert}\n\n{USER_PROMPT_DELIMITER_IN_HISTORY}{req.prompt}"
         )
-        logger.info(f"知识库内容已前置到用户 prompt。长度: {len(knowledge_to_insert)}")
+        logger.info(
+            f"知识库内容已前置到用户 prompt。原始长度: {len(original_prompt)} chars, "
+            f"知识库长度: {len(knowledge_to_insert)} chars, "
+            f"最终长度: {len(req.prompt)} chars"
+        )
     else:
         logger.warning(
             f"未知的知识库内容插入方式: {kb_insertion_method}，将默认前置到用户 prompt。"
@@ -178,8 +204,8 @@ async def enhance_request_with_kb(
             f"{knowledge_to_insert}\n\n{USER_PROMPT_DELIMITER_IN_HISTORY}{req.prompt}"
         )
 
-    logger.debug(f"修改后的 ProviderRequest.prompt: {req.prompt[:200]}...")
+    logger.debug(f"修改后的 ProviderRequest.prompt (前200字符): {req.prompt[:200]}...")
     if req.system_prompt:
         logger.debug(
-            f"修改后的 ProviderRequest.system_prompt: {req.system_prompt[:200]}..."
+            f"修改后的 ProviderRequest.system_prompt (前200字符): {req.system_prompt[:200]}..."
         )
