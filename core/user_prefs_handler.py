@@ -7,12 +7,13 @@ from astrbot.api import logger, AstrBotConfig
 from astrbot.api.star import Context
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.config.default import VERSION
+from .domain import CollectionMetadata, CollectionMetadataRepository
 
 if TYPE_CHECKING:
     from ..vector_store.base import VectorDBBase
 
 
-class UserPrefsHandler:
+class UserPrefsHandler(CollectionMetadataRepository):
     def __init__(
         self,
         prefs_path: str,
@@ -144,3 +145,40 @@ class UserPrefsHandler:
             if metadata.get("file_id") == file_id:
                 return collection_name
         return None
+
+    # ===== CollectionMetadataRepository 接口实现 =====
+
+    def get_metadata(self, collection_name: str) -> Optional[CollectionMetadata]:
+        """获取指定集合的元数据"""
+        metadatas = self.user_collection_preferences.get("collection_metadata", {})
+        metadata_dict = metadatas.get(collection_name)
+        if metadata_dict:
+            return CollectionMetadata.from_dict(collection_name, metadata_dict)
+        return None
+
+    def get_all_metadata(self) -> Dict[str, CollectionMetadata]:
+        """获取所有集合的元数据"""
+        metadatas = self.user_collection_preferences.get("collection_metadata", {})
+        result = {}
+        for collection_name, metadata_dict in metadatas.items():
+            result[collection_name] = CollectionMetadata.from_dict(
+                collection_name, metadata_dict
+            )
+        return result
+
+    def set_metadata(self, metadata: CollectionMetadata) -> None:
+        """设置集合元数据"""
+        if "collection_metadata" not in self.user_collection_preferences:
+            self.user_collection_preferences["collection_metadata"] = {}
+
+        self.user_collection_preferences["collection_metadata"][
+            metadata.collection_name
+        ] = metadata.to_dict()
+        logger.debug(f"设置集合 '{metadata.collection_name}' 的元数据")
+
+    def delete_metadata(self, collection_name: str) -> None:
+        """删除集合元数据"""
+        metadatas = self.user_collection_preferences.get("collection_metadata", {})
+        if collection_name in metadatas:
+            del metadatas[collection_name]
+            logger.debug(f"删除集合 '{collection_name}' 的元数据")

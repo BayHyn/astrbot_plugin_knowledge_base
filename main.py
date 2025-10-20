@@ -111,7 +111,7 @@ class KnowledgeBasePlugin(Star):
                         curr_embedding_dimensions=dim,
                         curr_embedding_util=embedding_util,
                         context=self.context,
-                        user_prefs_handler=self.user_prefs_handler,
+                        metadata_repo=self.user_prefs_handler,
                     )
                     if dim is not None and model_name is not None:
                         # 更新配置管理器中的 embedding 配置
@@ -133,7 +133,7 @@ class KnowledgeBasePlugin(Star):
                     curr_embedding_dimensions=kb_config.embedding_dimension,
                     curr_embedding_util=embedding_util,
                     context=self.context,
-                    user_prefs_handler=self.user_prefs_handler,
+                    metadata_repo=self.user_prefs_handler,
                 )
             logger.info("Embedding 工具初始化完成。")
 

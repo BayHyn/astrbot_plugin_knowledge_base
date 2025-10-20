@@ -2,7 +2,7 @@ import gc  # 添加垃圾回收模块
 from typing import List, Optional, Tuple
 from astrbot.api import logger
 from astrbot.api.star import Context
-from ..core.user_prefs_handler import UserPrefsHandler
+from ..core.domain import CollectionMetadataRepository, ProviderAccessor
 from openai import (
     AsyncOpenAI,
     APIError,
@@ -222,12 +222,21 @@ class EmbeddingSolutionHelper:
         curr_embedding_dimensions: int,
         curr_embedding_util: EmbeddingUtil,
         context: Context,
-        user_prefs_handler: UserPrefsHandler,
+        metadata_repo: CollectionMetadataRepository,
     ):
+        """
+        初始化 EmbeddingSolutionHelper
+
+        Args:
+            curr_embedding_dimensions: 当前嵌入向量维度
+            curr_embedding_util: 当前使用的嵌入工具
+            context: AstrBot Context (实现了 ProviderAccessor)
+            metadata_repo: 集合元数据仓库接口
+        """
         self.curr_embedding_dimensions = curr_embedding_dimensions
         self.curr_embedding_util = curr_embedding_util
         self.context = context
-        self.user_prefs_handler = user_prefs_handler
+        self.metadata_repo = metadata_repo
 
     async def _get_embedding_via_astrbot_provider(
         self, text: str | list[str], collection_name: str
@@ -235,27 +244,28 @@ class EmbeddingSolutionHelper:
         """通过 AstrBot 提供商获取单个文本的 embedding"""
         from astrbot.core.provider.provider import EmbeddingProvider
 
-        astrbot_embedding_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+        if not metadata or not metadata.embedding_provider_id:
+            raise ValueError(
+                f"未找到适用于集合 '{collection_name}' 的 AstrBot 嵌入提供商。请检查集合元数据。"
             )
-            .get(collection_name, {})
-            .get("embedding_provider_id", None)
-        )
-        if astrbot_embedding_provider_id:
-            provider = self.context.get_provider_by_id(astrbot_embedding_provider_id)
-            if provider and isinstance(provider, EmbeddingProvider):
-                if isinstance(text, str):
-                    return await provider.get_embedding(text)
-                elif isinstance(text, list):
-                    return await provider.get_embeddings(text)
-                else:
-                    raise TypeError(
-                        f"Unsupported type for text: {type(text)}. Expected str or list[str]."
-                    )
+
+        astrbot_embedding_provider_id = metadata.embedding_provider_id
+        provider = self.context.get_provider_by_id(astrbot_embedding_provider_id)
+
+        if provider and isinstance(provider, EmbeddingProvider):
+            if isinstance(text, str):
+                return await provider.get_embedding(text)
+            elif isinstance(text, list):
+                return await provider.get_embeddings(text)
+            else:
+                raise TypeError(
+                    f"Unsupported type for text: {type(text)}. Expected str or list[str]."
+                )
         else:
             raise ValueError(
-                f"未找到适用于集合 '{collection_name}' 的 AstrBot 嵌入提供商。请检查用户偏好设置或集合元数据。"
+                f"提供商 ID '{astrbot_embedding_provider_id}' 未找到或不是有效的嵌入提供商。"
             )
 
     def _get_embedding_dimensions_via_astrbot_provider(
@@ -264,20 +274,21 @@ class EmbeddingSolutionHelper:
         """通过 AstrBot 提供商获取对应提供商的嵌入模型的维度"""
         from astrbot.core.provider.provider import EmbeddingProvider
 
-        astrbot_embedding_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+        if not metadata or not metadata.embedding_provider_id:
+            raise ValueError(
+                f"未找到适用于集合 '{collection_name}' 的 AstrBot 嵌入提供商。请检查集合元数据。"
             )
-            .get(collection_name, {})
-            .get("embedding_provider_id", None)
-        )
-        if astrbot_embedding_provider_id:
-            provider = self.context.get_provider_by_id(astrbot_embedding_provider_id)
-            if provider and isinstance(provider, EmbeddingProvider):
-                return provider.get_dim()
+
+        astrbot_embedding_provider_id = metadata.embedding_provider_id
+        provider = self.context.get_provider_by_id(astrbot_embedding_provider_id)
+
+        if provider and isinstance(provider, EmbeddingProvider):
+            return provider.get_dim()
         else:
             raise ValueError(
-                f"未找到适用于集合 '{collection_name}' 的 AstrBot 嵌入提供商。请检查用户偏好设置或集合元数据。"
+                f"提供商 ID '{astrbot_embedding_provider_id}' 未找到或不是有效的嵌入提供商。"
             )
 
     def get_rerank_provider(self, collection_name: str):
@@ -287,31 +298,27 @@ class EmbeddingSolutionHelper:
         except Exception:
             logger.error("无法导入 RerankProvider，请确保 AstrBot 版本 >= v4.0.0。")
             return None
-        astrbot_rerank_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
-            )
-            .get(collection_name, {})
-            .get("rerank_provider_id", None)
-        )
-        if astrbot_rerank_provider_id:
-            provider = self.context.get_provider_by_id(astrbot_rerank_provider_id)
-            if provider and isinstance(provider, RerankProvider):
-                return provider
+
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+        if not metadata or not metadata.rerank_provider_id:
+            return None
+
+        astrbot_rerank_provider_id = metadata.rerank_provider_id
+        provider = self.context.get_provider_by_id(astrbot_rerank_provider_id)
+
+        if provider and isinstance(provider, RerankProvider):
+            return provider
         return None
 
     async def get_embedding_async(
         self, text: str, collection_name: str
     ) -> Optional[List[float]]:
-        """获取单个文本的 embedding，并更新用户偏好设置"""
-        astrbot_embedding_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
-            )
-            .get(collection_name, {})
-            .get("embedding_provider_id", None)
-        )
-        if astrbot_embedding_provider_id:
+        """获取单个文本的 embedding"""
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+
+        if metadata and metadata.embedding_provider_id:
             # we assume that if embedding_provider_id is set, it should be Version >= 3.5.13
             embedding = await self._get_embedding_via_astrbot_provider(
                 text, collection_name
@@ -323,15 +330,11 @@ class EmbeddingSolutionHelper:
     async def get_embeddings_async(
         self, texts: List[str], collection_name: str
     ) -> List[Optional[List[float]]]:
-        """获取多个文本的 embedding，并更新用户偏好设置"""
-        astrbot_embedding_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
-            )
-            .get(collection_name, {})
-            .get("embedding_provider_id", None)
-        )
-        if astrbot_embedding_provider_id:
+        """获取多个文本的 embedding"""
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+
+        if metadata and metadata.embedding_provider_id:
             # we assume that if embedding_provider_id is set, it should be Version >= 3.5.13
             embeddings = await self._get_embedding_via_astrbot_provider(
                 texts, collection_name
@@ -345,14 +348,11 @@ class EmbeddingSolutionHelper:
         await self.curr_embedding_util.close()
 
     def get_dimensions(self, collection_name) -> int:
-        astrbot_embedding_provider_id = (
-            self.user_prefs_handler.user_collection_preferences.get(
-                "collection_metadata", {}
-            )
-            .get(collection_name, {})
-            .get("embedding_provider_id", None)
-        )
-        if astrbot_embedding_provider_id:
+        """获取指定集合的嵌入向量维度"""
+        # 使用 metadata_repo 获取元数据
+        metadata = self.metadata_repo.get_metadata(collection_name)
+
+        if metadata and metadata.embedding_provider_id:
             # we assume that if embedding_provider_id is set, it should be Version >= 3.5.13
             return self._get_embedding_dimensions_via_astrbot_provider(collection_name)
         else:
