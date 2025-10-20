@@ -16,6 +16,7 @@ from astrbot.api.star import StarTools
 
 
 from .core import constants
+from .core.config_manager import ConfigManager
 from .utils.installation import ensure_vector_db_dependencies
 from .utils.embedding import EmbeddingUtil, EmbeddingSolutionHelper
 from .utils.text_splitter import TextSplitterUtil
@@ -53,6 +54,7 @@ class KnowledgeBasePlugin(Star):
         self.config = config
         self._initialize_basic_paths()
 
+        self.config_manager: Optional[ConfigManager] = None
         self.vector_db: Optional[VectorDBBase] = None
         self.embedding_util: Optional[EmbeddingSolutionHelper] = None
         self.text_splitter: Optional[TextSplitterUtil] = None
@@ -76,6 +78,10 @@ class KnowledgeBasePlugin(Star):
     async def _initialize_components(self):
         try:
             logger.info("知识库插件开始初始化...")
+
+            # Step 0: 创建配置管理器
+            self.config_manager = ConfigManager(self.config, self.context)
+            logger.info("配置管理器初始化完成")
 
             # Step 1: 创建不依赖 vector_db 的组件
             # User Preferences Handler (延迟注入 vector_db)
@@ -102,23 +108,23 @@ class KnowledgeBasePlugin(Star):
                         user_prefs_handler=self.user_prefs_handler,
                     )
                     if dim is not None and model_name is not None:
-                        self.config["embedding_dimension"] = dim
-                        self.config["embedding_model_name"] = model_name
+                        # 更新配置管理器中的 embedding 配置
+                        self.config_manager.update_embedding_config(dim, model_name)
                     logger.info("成功加载并使用 astrbot_plugin_embedding_adapter。")
             except Exception as e:
                 logger.warning(f"嵌入服务适配器插件加载失败: {e}", exc_info=True)
                 self.embedding_util = None  # Fallback
 
             if self.embedding_util is None:  # If adapter failed or not found
+                # 使用配置管理器中的配置
+                kb_config = self.config_manager.kb_config
                 embedding_util = EmbeddingUtil(
-                    api_url=self.config.get("embedding_api_url"),
-                    api_key=self.config.get("embedding_api_key"),
-                    model_name=self.config.get("embedding_model_name"),
+                    api_url=kb_config.embedding_api_url,
+                    api_key=kb_config.embedding_api_key,
+                    model_name=kb_config.embedding_model_name,
                 )
                 self.embedding_util = EmbeddingSolutionHelper(
-                    curr_embedding_dimensions=self.config.get(
-                        "embedding_dimension", 1024
-                    ),
+                    curr_embedding_dimensions=kb_config.embedding_dimension,
                     curr_embedding_util=embedding_util,
                     context=self.context,
                     user_prefs_handler=self.user_prefs_handler,
@@ -126,27 +132,27 @@ class KnowledgeBasePlugin(Star):
             logger.info("Embedding 工具初始化完成。")
 
             # Text Splitter
+            kb_config = self.config_manager.kb_config
             self.text_splitter = TextSplitterUtil(
-                chunk_size=self.config.get("text_chunk_size"),
-                chunk_overlap=self.config.get("text_chunk_overlap"),
+                chunk_size=kb_config.chunk_size,
+                chunk_overlap=kb_config.chunk_overlap,
             )
             logger.info("文本分割工具初始化完成。")
 
             # File Parser
             self.llm_config = LLM_Config(
-                context=self.context, status=self.config.get("LLM_model")
+                context=self.context, status=kb_config.llm_model
             )
             self.file_parser = FileParser(self.llm_config)
             logger.info("文件解析器初始化完成。")
 
             # Vector DB
-            db_type = self.config.get("vector_db_type", "faiss")
+            db_type = kb_config.vector_db_type
             logger.info(f"开始初始化向量数据库，类型: {db_type}")
 
             if db_type == "faiss":
-                faiss_subpath = self.config.get("faiss_db_subpath", "faiss_data")
                 faiss_full_path = os.path.join(
-                    self.persistent_data_root_path, faiss_subpath
+                    self.persistent_data_root_path, kb_config.faiss_db_path
                 )
                 self.vector_db = FaissStore(self.embedding_util, faiss_full_path)
             elif db_type == "milvus_lite":
@@ -164,10 +170,10 @@ class KnowledgeBasePlugin(Star):
                 self.vector_db = MilvusStore(
                     self.embedding_util,
                     data_path="",
-                    host=self.config.get("milvus_host"),
-                    port=self.config.get("milvus_port"),
-                    user=self.config.get("milvus_user"),
-                    password=self.config.get("milvus_password"),
+                    host=kb_config.milvus_host,
+                    port=kb_config.milvus_port,
+                    user=kb_config.milvus_user,
+                    password=kb_config.milvus_password,
                 )
             else:
                 logger.error(f"不支持的向量数据库类型: {db_type}，请检查配置。")
@@ -211,7 +217,8 @@ class KnowledgeBasePlugin(Star):
         if self.init_task and not self.init_task.done():
             await self.init_task
         if (
-            not self.vector_db
+            not self.config_manager
+            or not self.vector_db
             or not self.embedding_util
             or not self.text_splitter
             or not self.user_prefs_handler
@@ -230,7 +237,7 @@ class KnowledgeBasePlugin(Star):
         clean_contexts_from_kb_content(req)
 
         await enhance_request_with_kb(
-            event, req, self.vector_db, self.user_prefs_handler, self.config
+            event, req, self.vector_db, self.user_prefs_handler, self.config_manager
         )
 
     # --- Command Groups & Commands ---

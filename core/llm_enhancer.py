@@ -1,7 +1,7 @@
 # astrbot_plugin_knowledge_base/llm_enhancer.py
 from typing import TYPE_CHECKING
 
-from astrbot.api import logger, AstrBotConfig
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.provider import ProviderRequest
 from .constants import KB_START_MARKER, KB_END_MARKER, USER_PROMPT_DELIMITER_IN_HISTORY
@@ -9,6 +9,7 @@ from .constants import KB_START_MARKER, KB_END_MARKER, USER_PROMPT_DELIMITER_IN_
 if TYPE_CHECKING:
     from ..vector_store.base import VectorDBBase
     from .user_prefs_handler import UserPrefsHandler
+    from .config_manager import ConfigManager
 
 
 def clean_contexts_from_kb_content(req: ProviderRequest):
@@ -73,8 +74,17 @@ async def enhance_request_with_kb(
     req: ProviderRequest,
     vector_db: "VectorDBBase",
     user_prefs_handler: "UserPrefsHandler",
-    plugin_config: AstrBotConfig,
+    config_manager: "ConfigManager",
 ):
+    """使用知识库增强 LLM 请求
+
+    Args:
+        event: 消息事件
+        req: LLM 请求对象
+        vector_db: 向量数据库实例
+        user_prefs_handler: 用户偏好处理器
+        config_manager: 配置管理器（替代原有的 plugin_config）
+    """
     default_collection_name = user_prefs_handler.get_user_default_collection(event)
 
     # 明确检查 None 和空字符串：空字符串 "" 代表用户未设置知识库
@@ -88,15 +98,13 @@ async def enhance_request_with_kb(
         )
         return
 
-    # 获取LLM RAG配置
-    llm_rag_config = plugin_config.get("llm_rag_settings", {})
-    kb_search_top_k = plugin_config.get("search_top_k", 3)  # 复用现有的搜索配置
-    kb_insertion_method = llm_rag_config.get("insertion_method", "prepend_prompt")
-    kb_context_template = llm_rag_config.get(
-        "context_template",
-        "这是相关的知识库信息，请参考这些信息来回答用户的问题：\n{retrieved_contexts}",
-    )
-    min_similarity_score = llm_rag_config.get("min_similarity_score", 0.5)
+    # 获取用户级别的配置
+    user_config = config_manager.get_user_kb_config(event, default_collection_name)
+
+    kb_search_top_k = user_config.search_top_k
+    kb_insertion_method = user_config.insertion_method
+    kb_context_template = user_config.context_template
+    min_similarity_score = user_config.min_similarity_score
 
     logger.debug(
         f"RAG 配置: search_top_k={kb_search_top_k}, "
@@ -164,7 +172,7 @@ async def enhance_request_with_kb(
         retrieved_contexts=formatted_contexts
     )
 
-    max_kb_insert_length = llm_rag_config.get("max_insert_length", 200000)
+    max_kb_insert_length = user_config.max_insert_length
     original_length = len(knowledge_to_insert)
     if original_length > max_kb_insert_length:
         logger.warning(
