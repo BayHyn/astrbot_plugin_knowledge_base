@@ -30,11 +30,7 @@ class KnowledgeBaseWebAPI:
         self.user_prefs_handler = user_prefs_handler
         self.plugin_config = plugin_config
 
-        if VERSION < "3.5.13":
-            raise RuntimeError(
-                "AstrBot 版本过低，无法支持 FAISS 存储，请升级 AstrBot 至 3.5.13 或更高版本。"
-            )
-
+        # 注册 Web API 端点
         self.astrbot_context.register_web_api(
             "/alkaid/kb/create_collection",
             self.create_collection,

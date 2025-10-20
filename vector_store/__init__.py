@@ -1,5 +1,5 @@
 from .base import VectorDBBase
-from .faiss_store import FaissStore
+from .astrbot_faiss_store import FaissStore
 from .milvus_lite_store import MilvusLiteStore
 from .milvus_store import MilvusStore
 

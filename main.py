@@ -23,11 +23,17 @@ from .utils.text_splitter import TextSplitterUtil
 from .utils.file_parser import FileParser, LLM_Config
 from .vector_store.base import VectorDBBase
 
-if VERSION < "3.5.13":
-    logger.info("建议升级至 AstrBot v3.5.13 或更高版本。")
-    from .vector_store.faiss_store import FaissStore
-else:
-    from .vector_store.astrbot_faiss_store import FaissStore
+# 设定最低版本要求
+MIN_ASTRBOT_VERSION = "3.5.13"
+
+if VERSION < MIN_ASTRBOT_VERSION:
+    raise RuntimeError(
+        f"知识库插件需要 AstrBot >= {MIN_ASTRBOT_VERSION}，"
+        f"当前版本: {VERSION}。请升级 AstrBot。"
+    )
+
+# 只保留新版 Faiss 实现
+from .vector_store.astrbot_faiss_store import FaissStore
 from .vector_store.milvus_lite_store import MilvusLiteStore
 from .vector_store.milvus_store import MilvusStore
 from .web_api import KnowledgeBaseWebAPI
