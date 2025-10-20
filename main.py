@@ -17,6 +17,7 @@ from astrbot.api.star import StarTools
 
 from .core import constants
 from .core.config_manager import ConfigManager
+from .core.services import SearchService, RAGService
 from .utils.installation import ensure_vector_db_dependencies
 from .utils.embedding import EmbeddingUtil, EmbeddingSolutionHelper
 from .utils.text_splitter import TextSplitterUtil
@@ -38,7 +39,7 @@ from .vector_store.milvus_lite_store import MilvusLiteStore
 from .vector_store.milvus_store import MilvusStore
 from .web_api import KnowledgeBaseWebAPI
 from .core.user_prefs_handler import UserPrefsHandler
-from .core.llm_enhancer import clean_contexts_from_kb_content, enhance_request_with_kb
+from .core.llm_enhancer import enhance_request_with_kb
 from .commands import (
     general_commands,
     add_commands,
@@ -66,6 +67,8 @@ class KnowledgeBasePlugin(Star):
         self.text_splitter: Optional[TextSplitterUtil] = None
         self.file_parser: Optional[FileParser] = None
         self.user_prefs_handler: Optional[UserPrefsHandler] = None
+        self.search_service: Optional[SearchService] = None
+        self.rag_service: Optional[RAGService] = None
 
         ensure_vector_db_dependencies(self.config.get("vector_db_type", "faiss"))
         self.init_task = asyncio.create_task(self._initialize_components())
@@ -196,6 +199,23 @@ class KnowledgeBasePlugin(Star):
             else:
                 logger.warning("VectorDB 初始化失败，UserPrefsHandler 无法使用依赖 VectorDB 的功能")
 
+            # Step 4: 创建服务层
+            if self.vector_db and self.config_manager:
+                self.search_service = SearchService(
+                    vector_db=self.vector_db,
+                    config_manager=self.config_manager,
+                )
+                logger.info("SearchService 初始化完成")
+
+                self.rag_service = RAGService(
+                    search_service=self.search_service,
+                    metadata_repo=self.user_prefs_handler,
+                    config_manager=self.config_manager,
+                )
+                logger.info("RAGService 初始化完成")
+            else:
+                logger.warning("服务层初始化失败，缺少必要组件")
+
             # Web API
             try:
                 self.web_api = KnowledgeBaseWebAPI(
@@ -228,6 +248,8 @@ class KnowledgeBasePlugin(Star):
             or not self.embedding_util
             or not self.text_splitter
             or not self.user_prefs_handler
+            or not self.search_service
+            or not self.rag_service
         ):
             logger.error("知识库插件未正确初始化，请检查日志和配置。")
             return False
@@ -240,10 +262,8 @@ class KnowledgeBasePlugin(Star):
             logger.warning("LLM 请求时知识库插件未初始化，跳过知识库增强。")
             return
 
-        clean_contexts_from_kb_content(req)
-
         await enhance_request_with_kb(
-            event, req, self.vector_db, self.user_prefs_handler, self.config_manager
+            event, req, self.rag_service, self.user_prefs_handler
         )
 
     # --- Command Groups & Commands ---
