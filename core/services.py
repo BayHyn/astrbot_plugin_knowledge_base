@@ -6,6 +6,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.provider import ProviderRequest
 from .constants import KB_START_MARKER, KB_END_MARKER, USER_PROMPT_DELIMITER_IN_HISTORY
 from .domain import CollectionMetadataRepository
+from ..utils.logging_helper import log_start, log_success, log_error, log_warning, log_debug
 
 if TYPE_CHECKING:
     from ..vector_store.base import VectorDBBase, Document
@@ -63,19 +64,26 @@ class SearchService:
         if min_similarity is None:
             min_similarity = kb_config.min_similarity_score
 
-        logger.debug(
-            f"搜索参数: collection='{collection_name}', query='{query[:50]}...', "
-            f"top_k={top_k}, min_similarity={min_similarity}"
+        log_debug(
+            "搜索参数",
+            {
+                "collection": collection_name,
+                "query": query[:50],
+                "top_k": top_k,
+                "min_similarity": min_similarity,
+            },
         )
 
         # 执行搜索
         try:
             results = await self.vector_db.search(collection_name, query, top_k=top_k)
-            logger.info(
-                f"从知识库 '{collection_name}' 检索到 {len(results)} 个文档"
+            log_success(
+                "向量搜索",
+                collection_name,
+                f"检索到 {len(results)} 个文档",
             )
         except Exception as e:
-            logger.error(f"搜索失败: {e}", exc_info=True)
+            log_error("向量搜索", e, collection_name)
             raise
 
         # 过滤低相似度结果
@@ -84,9 +92,13 @@ class SearchService:
         ]
 
         if len(filtered_results) < len(results):
-            logger.debug(
-                f"过滤后保留 {len(filtered_results)}/{len(results)} 个文档 "
-                f"(相似度阈值: {min_similarity})"
+            log_debug(
+                "相似度过滤",
+                {
+                    "保留": len(filtered_results),
+                    "总数": len(results),
+                    "阈值": min_similarity,
+                },
             )
 
         return filtered_results
