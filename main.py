@@ -76,12 +76,16 @@ class KnowledgeBasePlugin(Star):
     async def _initialize_components(self):
         try:
             logger.info("知识库插件开始初始化...")
-            # User Preferences Handler
+
+            # Step 1: 创建不依赖 vector_db 的组件
+            # User Preferences Handler (延迟注入 vector_db)
             self.user_prefs_handler = UserPrefsHandler(
-                self.user_prefs_path, self.vector_db, self.config, self.context
+                self.user_prefs_path, self.config, self.context
             )
             await self.user_prefs_handler.load_user_preferences()
+            logger.debug("用户偏好处理器创建完成（vector_db 将在稍后注入）")
 
+            # Step 2: 初始化 Embedding 工具
             # Embedding Util
             try:
                 embedding_plugin = self.context.get_registered_star(
@@ -137,6 +141,7 @@ class KnowledgeBasePlugin(Star):
 
             # Vector DB
             db_type = self.config.get("vector_db_type", "faiss")
+            logger.info(f"开始初始化向量数据库，类型: {db_type}")
 
             if db_type == "faiss":
                 faiss_subpath = self.config.get("faiss_db_subpath", "faiss_data")
@@ -172,7 +177,12 @@ class KnowledgeBasePlugin(Star):
                 await self.vector_db.initialize()
                 logger.info(f"向量数据库 '{db_type}' 初始化完成。")
 
-            self.user_prefs_handler.vector_db = self.vector_db
+            # Step 3: 注入 vector_db 到依赖它的组件
+            if self.vector_db:
+                self.user_prefs_handler.set_vector_db(self.vector_db)
+                logger.debug("VectorDB 已注入到 UserPrefsHandler")
+            else:
+                logger.warning("VectorDB 初始化失败，UserPrefsHandler 无法使用依赖 VectorDB 的功能")
 
             # Web API
             try:

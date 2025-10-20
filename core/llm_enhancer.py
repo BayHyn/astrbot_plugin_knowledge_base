@@ -77,8 +77,9 @@ async def enhance_request_with_kb(
 ):
     default_collection_name = user_prefs_handler.get_user_default_collection(event)
 
-    if not default_collection_name:
-        logger.debug("未找到当前会话的默认知识库，跳过知识库查询。")
+    # 明确检查 None 和空字符串：空字符串 "" 代表用户未设置知识库
+    if default_collection_name is None or default_collection_name == "":
+        logger.debug("未设置默认知识库（返回值为 None 或空字符串），跳过知识库查询。")
         return
 
     if not await vector_db.collection_exists(default_collection_name):
