@@ -101,7 +101,7 @@ class KnowledgeBasePlugin(Star):
             logger.debug("用户偏好处理器创建完成（vector_db 将在稍后注入）")
 
             # Step 2: 初始化 Embedding 工具
-            # Embedding Util
+            # Embedding Util（不传入 metadata_repo，稍后注入）
             try:
                 embedding_plugin = self.context.get_registered_star(
                     "astrbot_plugin_embedding_adapter"
@@ -114,7 +114,7 @@ class KnowledgeBasePlugin(Star):
                         curr_embedding_dimensions=dim,
                         curr_embedding_util=embedding_util,
                         context=self.context,
-                        metadata_repo=self.user_prefs_handler,
+                        # metadata_repo 稍后注入
                     )
                     if dim is not None and model_name is not None:
                         # 更新配置管理器中的 embedding 配置
@@ -136,9 +136,9 @@ class KnowledgeBasePlugin(Star):
                     curr_embedding_dimensions=kb_config.embedding_dimension,
                     curr_embedding_util=embedding_util,
                     context=self.context,
-                    metadata_repo=self.user_prefs_handler,
+                    # metadata_repo 稍后注入
                 )
-            logger.info("Embedding 工具初始化完成。")
+            logger.info("Embedding 工具初始化完成（metadata_repo 将在稍后注入）。")
 
             # Text Splitter
             kb_config = self.config_manager.kb_config
@@ -192,12 +192,17 @@ class KnowledgeBasePlugin(Star):
                 await self.vector_db.initialize()
                 logger.info(f"向量数据库 '{db_type}' 初始化完成。")
 
-            # Step 3: 注入 vector_db 到依赖它的组件
+            # Step 3: 注入依赖
             if self.vector_db:
                 self.user_prefs_handler.set_vector_db(self.vector_db)
                 logger.debug("VectorDB 已注入到 UserPrefsHandler")
+
+                # 同时将 UserPrefsHandler 注入到 EmbeddingSolutionHelper
+                if self.embedding_util:
+                    self.embedding_util.set_metadata_repo(self.user_prefs_handler)
+                    logger.debug("UserPrefsHandler 已注入到 EmbeddingSolutionHelper")
             else:
-                logger.warning("VectorDB 初始化失败，UserPrefsHandler 无法使用依赖 VectorDB 的功能")
+                logger.warning("VectorDB 初始化失败，依赖注入无法完成")
 
             # Step 4: 创建服务层
             if self.vector_db and self.config_manager:
@@ -235,7 +240,6 @@ class KnowledgeBasePlugin(Star):
             logger.info("知识库插件初始化成功。")
 
         except Exception as e:
-            print("出现问题")
             logger.error(f"知识库插件初始化失败: {e}", exc_info=True)
             self.vector_db = None
 

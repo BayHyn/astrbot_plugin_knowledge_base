@@ -59,3 +59,8 @@ COMMON_ENCODINGS = [
     "iso-8859-1",
 ]
 READ_FILE_LIMIT = 4096  # 4KB
+
+# 搜索和批处理相关常量
+MAX_SEARCH_TOP_K = 30  # 搜索结果最大数量
+MIN_SEARCH_TOP_K = 1   # 搜索结果最小数量
+DEFAULT_EMBEDDING_BATCH_SIZE = 10  # Embedding 批处理大小

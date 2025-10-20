@@ -138,8 +138,15 @@ class UserPrefsHandler(CollectionMetadataRepository):
             del self.user_collection_preferences[user_key]
             await self.save_user_preferences()
 
-    def get_collection_name_by_file_id(self, file_id: str = None) -> dict:
-        """获取集合的元数据，包括嵌入提供商信息"""
+    def get_collection_name_by_file_id(self, file_id: Optional[str] = None) -> Optional[str]:
+        """获取集合名称（根据 file_id）
+
+        Args:
+            file_id: 文件 ID
+
+        Returns:
+            Optional[str]: 集合名称，如果未找到则返回 None
+        """
         metadatas = self.user_collection_preferences.get("collection_metadata", {})
         for collection_name, metadata in metadatas.items():
             if metadata.get("file_id") == file_id:

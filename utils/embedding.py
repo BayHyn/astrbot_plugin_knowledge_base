@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 from astrbot.api import logger
 from astrbot.api.star import Context
 from ..core.domain import CollectionMetadataRepository, ProviderAccessor
+from ..core.constants import DEFAULT_EMBEDDING_BATCH_SIZE
 from openai import (
     AsyncOpenAI,
     APIError,
@@ -106,8 +107,8 @@ class EmbeddingUtil:
         # 初始化结果列表，长度与输入文本列表一致，初始值为 None
         final_embeddings: List[Optional[List[float]]] = [None] * len(texts)
 
-        # 设置每批次大小为 10
-        batch_size = 10
+        # 设置批次大小
+        batch_size = DEFAULT_EMBEDDING_BATCH_SIZE
         total_batches = (len(valid_texts_with_indices) + batch_size - 1) // batch_size
         logger.info(f"将分 {total_batches} 个批次处理，每批最多 {batch_size} 个文本")
 
@@ -222,7 +223,7 @@ class EmbeddingSolutionHelper:
         curr_embedding_dimensions: int,
         curr_embedding_util: EmbeddingUtil,
         context: Context,
-        metadata_repo: CollectionMetadataRepository,
+        metadata_repo: Optional[CollectionMetadataRepository] = None,
     ):
         """
         初始化 EmbeddingSolutionHelper
@@ -231,12 +232,37 @@ class EmbeddingSolutionHelper:
             curr_embedding_dimensions: 当前嵌入向量维度
             curr_embedding_util: 当前使用的嵌入工具
             context: AstrBot Context (实现了 ProviderAccessor)
-            metadata_repo: 集合元数据仓库接口
+            metadata_repo: 集合元数据仓库接口（可选，支持延迟注入）
         """
         self.curr_embedding_dimensions = curr_embedding_dimensions
         self.curr_embedding_util = curr_embedding_util
         self.context = context
-        self.metadata_repo = metadata_repo
+        self._metadata_repo = metadata_repo
+
+    def set_metadata_repo(self, metadata_repo: CollectionMetadataRepository) -> None:
+        """延迟注入元数据仓库
+
+        Args:
+            metadata_repo: 集合元数据仓库接口
+        """
+        self._metadata_repo = metadata_repo
+        logger.debug("元数据仓库已成功注入到 EmbeddingSolutionHelper")
+
+    @property
+    def metadata_repo(self) -> CollectionMetadataRepository:
+        """获取元数据仓库实例
+
+        Returns:
+            CollectionMetadataRepository: 元数据仓库实例
+
+        Raises:
+            RuntimeError: 如果元数据仓库尚未设置
+        """
+        if self._metadata_repo is None:
+            raise RuntimeError(
+                "元数据仓库尚未初始化。请确保在使用前调用 set_metadata_repo() 方法。"
+            )
+        return self._metadata_repo
 
     async def _get_embedding_via_astrbot_provider(
         self, text: str | list[str], collection_name: str

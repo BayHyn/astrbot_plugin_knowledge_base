@@ -3,6 +3,7 @@
 from typing import Optional, TYPE_CHECKING, AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from ..core.constants import MAX_SEARCH_TOP_K, MIN_SEARCH_TOP_K
 
 if TYPE_CHECKING:
     from ..main import KnowledgeBasePlugin
@@ -173,13 +174,13 @@ def parse_top_k(top_k_str: Optional[str], default: int = 1, max_value: int = 30)
 
     # 如果已经是整数
     if isinstance(top_k_str, int):
-        return max(1, min(top_k_str, max_value))
+        return max(MIN_SEARCH_TOP_K, min(top_k_str, max_value))
 
     # 尝试转换字符串
     if isinstance(top_k_str, str) and top_k_str.isdigit():
         try:
             top_k = int(top_k_str)
-            return max(1, min(top_k, max_value))
+            return max(MIN_SEARCH_TOP_K, min(top_k, max_value))
         except ValueError:
             logger.warning(
                 f"无法将 top_k 参数 '{top_k_str}' 转换为整数,将使用默认值 {default}"

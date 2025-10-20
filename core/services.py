@@ -144,8 +144,9 @@ class RAGService:
 
             # 处理 system 消息
             if role == "system" and KB_START_MARKER in content:
-                logger.debug(
-                    f"从历史对话中删除知识库 system 消息: {content[:100]}..."
+                log_debug(
+                    "清理历史对话",
+                    {"action": "删除知识库 system 消息", "content_preview": content[:100]}
                 )
                 continue
 
@@ -167,20 +168,22 @@ class RAGService:
                         ].strip()
                         message["content"] = original_prompt
                         cleaned_contexts.append(message)
-                        logger.debug(
-                            f"从历史对话 user 消息中清理知识库内容,保留原用户问题: "
-                            f"{original_prompt[:100]}..."
+                        log_debug(
+                            "清理历史对话",
+                            {"action": "从 user 消息中清理知识库内容", "原问题": original_prompt[:100]}
                         )
                     else:
-                        logger.warning(
-                            f"用户消息中检测到知识库标记但缺少原始问题分隔符,删除该消息: "
-                            f"{content[:100]}..."
+                        log_warning(
+                            "清理历史对话",
+                            "缺少原始问题分隔符",
+                            details={"content_preview": content[:100]}
                         )
                         continue
                 else:
-                    logger.warning(
-                        f"用户消息中检测到知识库起始标记但缺少结束标记,删除该消息: "
-                        f"{content[:100]}..."
+                    log_warning(
+                        "清理历史对话",
+                        "缺少知识库结束标记",
+                        details={"content_preview": content[:100]}
                     )
                     continue
             else:
@@ -191,7 +194,11 @@ class RAGService:
         removed_count = initial_count - len(req.contexts)
 
         if removed_count > 0:
-            logger.info(f"成功从历史对话中删除了 {removed_count} 条知识库补充消息")
+            log_success(
+                "清理历史对话",
+                result=f"删除了 {removed_count} 条知识库补充消息",
+                details={"初始数量": initial_count, "清理后": len(req.contexts)}
+            )
 
     async def enhance_request(
         self,
@@ -215,14 +222,15 @@ class RAGService:
 
         user_query = req.prompt
         if not user_query or not user_query.strip():
-            logger.debug("用户查询为空,跳过知识库增强")
+            log_debug("知识库增强", {"状态": "跳过", "原因": "用户查询为空"})
             return
 
         # 搜索相关知识
         try:
-            logger.info(
-                f"为 LLM 请求在知识库 '{collection_name}' 中搜索: "
-                f"'{user_query[:50]}...' (top_k={user_config.search_top_k})"
+            log_start(
+                "知识库增强搜索",
+                collection_name,
+                {"查询": user_query[:50], "top_k": user_config.search_top_k}
             )
             search_results = await self.search_service.search(
                 collection_name=collection_name,
@@ -231,21 +239,23 @@ class RAGService:
                 min_similarity=user_config.min_similarity_score,
             )
         except Exception as e:
-            logger.error(
-                f"LLM 请求时从知识库 '{collection_name}' 搜索失败: {e}",
-                exc_info=True,
-            )
+            log_error("知识库增强搜索", e, collection_name)
             return
 
         if not search_results:
-            logger.info(
-                f"在知识库 '{collection_name}' 中未找到相关内容 "
-                f"(查询: '{user_query[:50]}...')"
+            log_warning(
+                "知识库增强搜索",
+                "未找到相关内容",
+                collection_name,
+                {"查询": user_query[:50]}
             )
             return
 
-        logger.info(
-            f"从知识库检索到 {len(search_results)} 个相关文档,准备注入到 LLM 请求"
+        log_success(
+            "知识库增强搜索",
+            collection_name,
+            f"检索到 {len(search_results)} 个相关文档",
+            {"准备": "注入到 LLM 请求"}
         )
 
         # 格式化检索内容
@@ -256,9 +266,14 @@ class RAGService:
                 f"- 内容: {doc.text_content} (来源: {source_info}, 相关度: {score:.2f})"
             )
             retrieved_contexts_list.append(context_item)
-            logger.debug(
-                f"文档 #{idx+1}: 相关度={score:.4f}, 来源={source_info}, "
-                f"内容='{doc.text_content[:50]}...'"
+            log_debug(
+                "检索文档详情",
+                {
+                    "序号": idx+1,
+                    "相关度": f"{score:.4f}",
+                    "来源": source_info,
+                    "内容": doc.text_content[:50]
+                }
             )
 
         formatted_contexts = "\n".join(retrieved_contexts_list)
@@ -271,17 +286,18 @@ class RAGService:
         original_length = len(knowledge_to_insert)
 
         if original_length > max_length:
-            logger.warning(
-                f"知识库插入内容过长 ({original_length} chars), "
-                f"将被截断至 {max_length} chars"
+            log_warning(
+                "知识库内容长度检查",
+                f"内容过长,截断至 {max_length} chars",
+                details={"原长度": original_length, "限制": max_length}
             )
             knowledge_to_insert = (
                 knowledge_to_insert[:max_length] + "\n... [内容已截断]"
             )
         else:
-            logger.debug(
-                f"知识库内容长度: {original_length} chars "
-                f"(未超过限制 {max_length})"
+            log_debug(
+                "知识库内容长度检查",
+                {"长度": original_length, "限制": max_length, "状态": "通过"}
             )
 
         # 添加标记
@@ -297,10 +313,13 @@ class RAGService:
                 req.system_prompt = f"{knowledge_to_insert}\n\n{req.system_prompt}"
             else:
                 req.system_prompt = knowledge_to_insert
-            logger.info(
-                f"知识库内容已添加到 system_prompt "
-                f"(最终长度: {len(req.system_prompt)} chars, "
-                f"知识库部分: {len(knowledge_to_insert)} chars)"
+            log_success(
+                "知识库内容注入",
+                "system_prompt",
+                details={
+                    "最终长度": len(req.system_prompt),
+                    "知识库部分": len(knowledge_to_insert)
+                }
             )
 
         elif insertion_method == "prepend_prompt":
@@ -309,17 +328,21 @@ class RAGService:
                 f"{knowledge_to_insert}\n\n"
                 f"{USER_PROMPT_DELIMITER_IN_HISTORY}{req.prompt}"
             )
-            logger.info(
-                f"知识库内容已前置到用户 prompt "
-                f"(原始长度: {len(original_prompt)} chars, "
-                f"知识库长度: {len(knowledge_to_insert)} chars, "
-                f"最终长度: {len(req.prompt)} chars)"
+            log_success(
+                "知识库内容注入",
+                "prepend_prompt",
+                details={
+                    "原始长度": len(original_prompt),
+                    "知识库长度": len(knowledge_to_insert),
+                    "最终长度": len(req.prompt)
+                }
             )
 
         else:
-            logger.warning(
-                f"未知的知识库内容插入方式: {insertion_method}, "
-                f"将默认前置到用户 prompt"
+            log_warning(
+                "知识库内容注入",
+                f"未知插入方式: {insertion_method},使用默认方式",
+                details={"默认方式": "prepend_prompt"}
             )
             req.prompt = (
                 f"{knowledge_to_insert}\n\n"
@@ -327,11 +350,12 @@ class RAGService:
             )
 
         # 记录修改后的内容（用于调试）
-        logger.debug(
-            f"修改后的 ProviderRequest.prompt (前200字符): {req.prompt[:200]}..."
+        log_debug(
+            "LLM 请求内容",
+            {"prompt_preview": req.prompt[:200]}
         )
         if req.system_prompt:
-            logger.debug(
-                f"修改后的 ProviderRequest.system_prompt (前200字符): "
-                f"{req.system_prompt[:200]}..."
+            log_debug(
+                "LLM 请求内容",
+                {"system_prompt_preview": req.system_prompt[:200]}
             )
