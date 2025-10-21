@@ -3,6 +3,10 @@ from typing import Optional, TYPE_CHECKING, AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from .base import CommandContext, BaseCommandHandler, parse_top_k, validate_non_empty
+from ..core.constants import (
+    QUERY_PREVIEW_LENGTH,
+    CONTENT_DISPLAY_LENGTH,
+)
 
 if TYPE_CHECKING:
     from ..main import KnowledgeBasePlugin
@@ -21,7 +25,7 @@ class SearchCommandHandler(BaseCommandHandler):
         super().__init__(ctx)
         self.query = query
         self.collection_name = collection_name
-        self.top_k = parse_top_k(top_k_str, default=1, max_value=30)
+        self.top_k = parse_top_k(top_k_str)
 
     async def execute(self) -> AsyncGenerator[AstrMessageEvent, None]:
         """执行搜索命令"""
@@ -44,15 +48,20 @@ class SearchCommandHandler(BaseCommandHandler):
             return
 
         # 4. 执行搜索
+        query_preview = (
+            self.query[:QUERY_PREVIEW_LENGTH]
+            if len(self.query) > QUERY_PREVIEW_LENGTH
+            else self.query
+        )
         logger.info(
-            f"搜索知识库 '{target_collection}',查询: '{self.query[:30]}...', "
+            f"搜索知识库 '{target_collection}',查询: '{query_preview}...', "
             f"top_k: {self.top_k}"
         )
 
         try:
             yield self.reply(
                 f"正在知识库 '{target_collection}' 中搜索 "
-                f"'{self.query[:30]}...' (最多{self.top_k}条)..."
+                f"'{query_preview}...' (最多{self.top_k}条)..."
             )
 
             # 使用 SearchService
@@ -65,13 +74,13 @@ class SearchCommandHandler(BaseCommandHandler):
             if not search_results:
                 yield self.reply(
                     f"在知识库 '{target_collection}' 中未找到与 "
-                    f"'{self.query[:30]}...' 相关的内容。"
+                    f"'{query_preview}...' 相关的内容。"
                 )
                 return
 
             # 5. 格式化结果
             response_message = (
-                f"知识库 '{target_collection}' 中关于 '{self.query[:30]}...' "
+                f"知识库 '{target_collection}' 中关于 '{query_preview}...' "
                 f"的搜索结果 (相关度从高到低):\n"
             )
 
@@ -83,8 +92,8 @@ class SearchCommandHandler(BaseCommandHandler):
                 )
                 response_message += f"\n{i + 1}. [相关度: {score:.2f}]{source_info}\n"
                 content_preview = (
-                    doc.text_content[:200] + "..."
-                    if len(doc.text_content) > 200
+                    doc.text_content[:CONTENT_DISPLAY_LENGTH] + "..."
+                    if len(doc.text_content) > CONTENT_DISPLAY_LENGTH
                     else doc.text_content
                 )
                 response_message += f"   内容: {content_preview}\n"
@@ -103,7 +112,7 @@ class SearchCommandHandler(BaseCommandHandler):
 
             logger.info(
                 f"搜索完成,返回 {len(search_results)} 条结果 "
-                f"(知识库: '{target_collection}', 查询: '{self.query[:30]}...')"
+                f"(知识库: '{target_collection}', 查询: '{query_preview}...')"
             )
 
         except Exception as e:

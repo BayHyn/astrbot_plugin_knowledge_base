@@ -1,9 +1,13 @@
 # astrbot_plugin_knowledge_base/commands/base.py
 """命令处理基类 - 统一命令处理模式"""
-from typing import Optional, TYPE_CHECKING, AsyncGenerator
+from typing import Optional, TYPE_CHECKING, AsyncGenerator, Tuple
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from ..core.constants import MAX_SEARCH_TOP_K, MIN_SEARCH_TOP_K
+from ..core.constants import (
+    MAX_SEARCH_TOP_K,
+    MIN_SEARCH_TOP_K,
+    DEFAULT_SEARCH_TOP_K,
+)
 
 if TYPE_CHECKING:
     from ..main import KnowledgeBasePlugin
@@ -51,7 +55,7 @@ class CommandContext:
 
     async def ensure_collection_exists(
         self, collection_name: str, auto_create: bool = False
-    ) -> tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str]]:
         """
         确保知识库存在
 
@@ -149,7 +153,7 @@ class BaseCommandHandler:
 
     async def ensure_collection_exists(
         self, collection_name: str, auto_create: bool = False
-    ) -> tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str]]:
         """快捷方法:确保知识库存在"""
         return await self.ctx.ensure_collection_exists(collection_name, auto_create)
 
@@ -157,7 +161,11 @@ class BaseCommandHandler:
 # ===== 辅助函数 =====
 
 
-def parse_top_k(top_k_str: Optional[str], default: int = 1, max_value: int = 30) -> int:
+def parse_top_k(
+    top_k_str: Optional[str],
+    default: int = DEFAULT_SEARCH_TOP_K,
+    max_value: int = MAX_SEARCH_TOP_K,
+) -> int:
     """
     解析 top_k 参数
 

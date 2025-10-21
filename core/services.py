@@ -4,7 +4,14 @@ from typing import List, Tuple, Optional, TYPE_CHECKING
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.provider import ProviderRequest
-from .constants import KB_START_MARKER, KB_END_MARKER, USER_PROMPT_DELIMITER_IN_HISTORY
+from .constants import (
+    KB_START_MARKER,
+    KB_END_MARKER,
+    USER_PROMPT_DELIMITER_IN_HISTORY,
+    QUERY_LOG_LENGTH,
+    CONTENT_PREVIEW_LENGTH,
+    PROMPT_PREVIEW_LENGTH,
+)
 from .domain import CollectionMetadataRepository
 from ..utils.logging_helper import log_start, log_success, log_error, log_warning, log_debug
 
@@ -68,7 +75,7 @@ class SearchService:
             "搜索参数",
             {
                 "collection": collection_name,
-                "query": query[:50],
+                "query": query[:QUERY_LOG_LENGTH],
                 "top_k": top_k,
                 "min_similarity": min_similarity,
             },
@@ -146,7 +153,7 @@ class RAGService:
             if role == "system" and KB_START_MARKER in content:
                 log_debug(
                     "清理历史对话",
-                    {"action": "删除知识库 system 消息", "content_preview": content[:100]}
+                    {"action": "删除知识库 system 消息", "content_preview": content[:CONTENT_PREVIEW_LENGTH]}
                 )
                 continue
 
@@ -170,20 +177,20 @@ class RAGService:
                         cleaned_contexts.append(message)
                         log_debug(
                             "清理历史对话",
-                            {"action": "从 user 消息中清理知识库内容", "原问题": original_prompt[:100]}
+                            {"action": "从 user 消息中清理知识库内容", "原问题": original_prompt[:CONTENT_PREVIEW_LENGTH]}
                         )
                     else:
                         log_warning(
                             "清理历史对话",
                             "缺少原始问题分隔符",
-                            details={"content_preview": content[:100]}
+                            details={"content_preview": content[:CONTENT_PREVIEW_LENGTH]}
                         )
                         continue
                 else:
                     log_warning(
                         "清理历史对话",
                         "缺少知识库结束标记",
-                        details={"content_preview": content[:100]}
+                        details={"content_preview": content[:CONTENT_PREVIEW_LENGTH]}
                     )
                     continue
             else:
@@ -230,7 +237,7 @@ class RAGService:
             log_start(
                 "知识库增强搜索",
                 collection_name,
-                {"查询": user_query[:50], "top_k": user_config.search_top_k}
+                {"查询": user_query[:QUERY_LOG_LENGTH], "top_k": user_config.search_top_k}
             )
             search_results = await self.search_service.search(
                 collection_name=collection_name,
@@ -247,7 +254,7 @@ class RAGService:
                 "知识库增强搜索",
                 "未找到相关内容",
                 collection_name,
-                {"查询": user_query[:50]}
+                {"查询": user_query[:QUERY_LOG_LENGTH]}
             )
             return
 
@@ -272,7 +279,7 @@ class RAGService:
                     "序号": idx+1,
                     "相关度": f"{score:.4f}",
                     "来源": source_info,
-                    "内容": doc.text_content[:50]
+                    "内容": doc.text_content[:QUERY_LOG_LENGTH]
                 }
             )
 
@@ -352,10 +359,10 @@ class RAGService:
         # 记录修改后的内容（用于调试）
         log_debug(
             "LLM 请求内容",
-            {"prompt_preview": req.prompt[:200]}
+            {"prompt_preview": req.prompt[:PROMPT_PREVIEW_LENGTH]}
         )
         if req.system_prompt:
             log_debug(
                 "LLM 请求内容",
-                {"system_prompt_preview": req.system_prompt[:200]}
+                {"system_prompt_preview": req.system_prompt[:PROMPT_PREVIEW_LENGTH]}
             )

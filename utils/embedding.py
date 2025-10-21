@@ -3,7 +3,11 @@ from typing import List, Optional, Tuple
 from astrbot.api import logger
 from astrbot.api.star import Context
 from ..core.domain import CollectionMetadataRepository, ProviderAccessor
-from ..core.constants import DEFAULT_EMBEDDING_BATCH_SIZE
+from ..core.constants import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    HTTP_REQUEST_TIMEOUT,
+    QUERY_LOG_LENGTH,
+)
 from openai import (
     AsyncOpenAI,
     APIError,
@@ -28,7 +32,7 @@ class EmbeddingUtil:
         self.client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url_for_client,
-            timeout=30.0,
+            timeout=HTTP_REQUEST_TIMEOUT,
         )
 
     async def get_embedding_async(self, text: str) -> Optional[List[float]]:
@@ -37,7 +41,7 @@ class EmbeddingUtil:
             logger.warning("输入文本为空或仅包含空白，无法获取 embedding。")
             return None
 
-        logger.debug(f"开始为文本生成 embedding，长度: {len(text)} chars, 内容: '{text[:50]}...'")
+        logger.debug(f"开始为文本生成 embedding，长度: {len(text)} chars, 内容: '{text[:QUERY_LOG_LENGTH]}...'")
 
         try:
             response = await self.client.embeddings.create(
@@ -81,7 +85,7 @@ class EmbeddingUtil:
     async def get_embeddings_async(
         self, texts: List[str]
     ) -> List[Optional[List[float]]]:
-        """获取多个文本的 embedding (使用 OpenAI 批量接口)，每 10 条文本分批请求"""
+        """获取多个文本的 embedding (使用 OpenAI 批量接口)，批次大小由常量定义"""
         if not texts:
             logger.info("输入文本列表为空，返回空 embedding 列表。")
             return []
